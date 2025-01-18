@@ -1,318 +1,269 @@
-import itertools
-from typing import Sequence, Mapping, Dict
-from comfy_execution.graph import DynamicPrompt
+from __future__ import annotations
+from typing import Type, Literal
 
 import nodes
-
 from comfy_execution.graph_utils import is_link
+from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
 
-NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
+
+class DependencyCycleError(Exception):
+    pass
 
 
-def include_unique_id_in_input(class_type: str) -> bool:
-    if class_type in NODE_CLASS_CONTAINS_UNIQUE_ID:
-        return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
-    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = "UNIQUE_ID" in class_def.INPUT_TYPES().get("hidden", {}).values()
-    return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
+class NodeInputError(Exception):
+    pass
 
-class CacheKeySet:
-    def __init__(self, dynprompt, node_ids, is_changed_cache):
-        self.keys = {}
-        self.subcache_keys = {}
 
-    def add_keys(self, node_ids):
-        raise NotImplementedError()
+class NodeNotFoundError(Exception):
+    pass
 
-    def all_node_ids(self):
-        return set(self.keys.keys())
 
-    def get_used_keys(self):
-        return self.keys.values()
+def get_input_info(
+    class_def: Type[ComfyNodeABC],
+    input_name: str,
+    valid_inputs: InputTypeDict | None = None,
+) -> (
+    tuple[str, Literal["required", "optional", "hidden"], InputTypeOptions]
+    | tuple[None, None, None]
+):
+    """Get the input type, category, and extra info for a given input name.
 
-    def get_used_subcache_keys(self):
-        return self.subcache_keys.values()
+    Arguments:
+        class_def: The class definition of the node.
+        input_name: The name of the input to get info for.
+        valid_inputs: The valid inputs for the node, or None to use the class_def.INPUT_TYPES().
 
-    def get_data_key(self, node_id):
-        return self.keys.get(node_id, None)
+    Returns:
+        tuple[str, str, dict] | tuple[None, None, None]: The input type, category, and extra info for the input name.
+    """
 
-    def get_subcache_key(self, node_id):
-        return self.subcache_keys.get(node_id, None)
-
-class Unhashable:
-    def __init__(self):
-        self.value = float("NaN")
-
-def to_hashable(obj):
-    # So that we don't infinitely recurse since frozenset and tuples
-    # are Sequences.
-    if isinstance(obj, (int, float, str, bool, type(None))):
-        return obj
-    elif isinstance(obj, Mapping):
-        return frozenset([(to_hashable(k), to_hashable(v)) for k, v in sorted(obj.items())])
-    elif isinstance(obj, Sequence):
-        return frozenset(zip(itertools.count(), [to_hashable(i) for i in obj]))
+    valid_inputs = valid_inputs or class_def.INPUT_TYPES()
+    input_info = None
+    input_category = None
+    if "required" in valid_inputs and input_name in valid_inputs["required"]:
+        input_category = "required"
+        input_info = valid_inputs["required"][input_name]
+    elif "optional" in valid_inputs and input_name in valid_inputs["optional"]:
+        input_category = "optional"
+        input_info = valid_inputs["optional"][input_name]
+    elif "hidden" in valid_inputs and input_name in valid_inputs["hidden"]:
+        input_category = "hidden"
+        input_info = valid_inputs["hidden"][input_name]
+    if input_info is None:
+        return None, None, None
+    input_type = input_info[0]
+    if len(input_info) > 1:
+        extra_info = input_info[1]
     else:
-        # TODO - Support other objects like tensors?
-        return Unhashable()
+        extra_info = {}
+    return input_type, input_category, extra_info
 
-class CacheKeySetID(CacheKeySet):
-    def __init__(self, dynprompt, node_ids, is_changed_cache):
-        super().__init__(dynprompt, node_ids, is_changed_cache)
-        self.dynprompt = dynprompt
-        self.add_keys(node_ids)
 
-    def add_keys(self, node_ids):
-        for node_id in node_ids:
-            if node_id in self.keys:
+class TopologicalSort:
+    def __init__(self, prompt):
+        self.prompt = prompt
+        self.pendingNodes = {}
+        self.blockCount = {}  # Number of nodes this node is directly blocked by
+        self.blocking = {}  # Which nodes are blocked by this node
+
+    def get_input_info(self, unique_id, input_name):
+        class_type = self.prompt[unique_id]["class_type"]
+        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+        return get_input_info(class_def, input_name)
+
+    def make_input_strong_link(self, to_node_id, to_input):
+        inputs = self.prompt[to_node_id]["inputs"]
+        if to_input not in inputs:
+            raise NodeInputError(
+                f"Node {to_node_id} says it needs input {to_input}, but there is no input to that node at all"
+            )
+        value = inputs[to_input]
+        if not is_link(value):
+            raise NodeInputError(
+                f"Node {to_node_id} says it needs input {to_input}, but that value is a constant"
+            )
+        from_node_id, from_socket = value
+        self.add_strong_link(from_node_id, from_socket, to_node_id)
+
+    def add_strong_link(self, from_node_id, from_socket, to_node_id):
+        if not self.is_cached(from_node_id):
+            self.add_node(from_node_id)
+            if to_node_id not in self.blocking[from_node_id]:
+                self.blocking[from_node_id][to_node_id] = {}
+                self.blockCount[to_node_id] += 1
+            self.blocking[from_node_id][to_node_id][from_socket] = True
+
+    def add_node(self, node_unique_id, include_lazy=False, subgraph_nodes=None):
+        node_ids = [node_unique_id]
+        links = []
+
+        while len(node_ids) > 0:
+            unique_id = node_ids.pop()
+            if unique_id in self.pendingNodes:
                 continue
-            if not self.dynprompt.has_node(node_id):
-                continue
-            node = self.dynprompt.get_node(node_id)
-            self.keys[node_id] = (node_id, node["class_type"])
-            self.subcache_keys[node_id] = (node_id, node["class_type"])
 
-class CacheKeySetInputSignature(CacheKeySet):
-    def __init__(self, dynprompt, node_ids, is_changed_cache):
-        super().__init__(dynprompt, node_ids, is_changed_cache)
-        self.dynprompt = dynprompt
-        self.is_changed_cache = is_changed_cache
-        self.add_keys(node_ids)
+            self.pendingNodes[unique_id] = True
+            self.blockCount[unique_id] = 0
+            self.blocking[unique_id] = {}
 
-    def include_node_id_in_input(self) -> bool:
+            inputs = self.prompt[unique_id]["inputs"]
+            for input_name in inputs:
+                value = inputs[input_name]
+                if is_link(value):
+                    from_node_id, from_socket = value
+                    if (
+                        subgraph_nodes is not None
+                        and from_node_id not in subgraph_nodes
+                    ):
+                        continue
+                    _, _, input_info = self.get_input_info(unique_id, input_name)
+                    is_lazy = (
+                        input_info is not None
+                        and "lazy" in input_info
+                        and input_info["lazy"]
+                    )
+                    if (include_lazy or not is_lazy) and not self.is_cached(
+                        from_node_id
+                    ):
+                        node_ids.append(from_node_id)
+                        links.append((from_node_id, from_socket, unique_id))
+
+        for link in links:
+            self.add_strong_link(*link)
+
+    def is_cached(self, node_id):
         return False
 
-    def add_keys(self, node_ids):
-        for node_id in node_ids:
-            if node_id in self.keys:
-                continue
-            if not self.dynprompt.has_node(node_id):
-                continue
-            node = self.dynprompt.get_node(node_id)
-            self.keys[node_id] = self.get_node_signature(self.dynprompt, node_id)
-            self.subcache_keys[node_id] = (node_id, node["class_type"])
+    def get_ready_nodes(self):
+        return [
+            node_id for node_id in self.pendingNodes if self.blockCount[node_id] == 0
+        ]
 
-    def get_node_signature(self, dynprompt, node_id):
-        signature = []
-        ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
-        signature.append(self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
-        for ancestor_id in ancestors:
-            signature.append(self.get_immediate_node_signature(dynprompt, ancestor_id, order_mapping))
-        return to_hashable(signature)
+    def pop_node(self, unique_id):
+        del self.pendingNodes[unique_id]
+        for blocked_node_id in self.blocking[unique_id]:
+            self.blockCount[blocked_node_id] -= 1
+        del self.blocking[unique_id]
 
-    def get_immediate_node_signature(self, dynprompt, node_id, ancestor_order_mapping):
-        if not dynprompt.has_node(node_id):
-            # This node doesn't exist -- we can't cache it.
-            return [float("NaN")]
-        node = dynprompt.get_node(node_id)
-        class_type = node["class_type"]
-        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        signature = [class_type, self.is_changed_cache.get(node_id)]
-        if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
-            signature.append(node_id)
-        inputs = node["inputs"]
-        for key in sorted(inputs.keys()):
-            if is_link(inputs[key]):
-                (ancestor_id, ancestor_socket) = inputs[key]
-                ancestor_index = ancestor_order_mapping[ancestor_id]
-                signature.append((key,("ANCESTOR", ancestor_index, ancestor_socket)))
-            else:
-                signature.append((key, inputs[key]))
-        return signature
+    def is_empty(self):
+        return len(self.pendingNodes) == 0
 
-    # This function returns a list of all ancestors of the given node. The order of the list is
-    # deterministic based on which specific inputs the ancestor is connected by.
-    def get_ordered_ancestry(self, dynprompt, node_id):
-        ancestors = []
-        order_mapping = {}
-        self.get_ordered_ancestry_internal(dynprompt, node_id, ancestors, order_mapping)
-        return ancestors, order_mapping
 
-    def get_ordered_ancestry_internal(self, dynprompt, node_id, ancestors, order_mapping):
-        if not dynprompt.has_node(node_id):
-            return
-        inputs = dynprompt.get_node(node_id)["inputs"]
-        input_keys = sorted(inputs.keys())
-        for key in input_keys:
-            if is_link(inputs[key]):
-                ancestor_id = inputs[key][0]
-                if ancestor_id not in order_mapping:
-                    ancestors.append(ancestor_id)
-                    order_mapping[ancestor_id] = len(ancestors) - 1
-                    self.get_ordered_ancestry_internal(dynprompt, ancestor_id, ancestors, order_mapping)
+class ExecutionList(TopologicalSort):
+    """
+    ExecutionList implements a topological dissolve of the graph. After a node is staged for execution,
+    it can still be returned to the graph after having further dependencies added.
+    """
 
-class BasicCache:
-    def __init__(self, key_class):
-        self.key_class = key_class
-        self.initialized = False
-        self.dynprompt: DynamicPrompt
-        self.cache_key_set: CacheKeySet
-        self.cache = {}
-        self.subcaches = {}
+    def __init__(self, prompt):
+        super().__init__(prompt)
+        self.staged_node_id = None
 
-    def set_prompt(self, dynprompt, node_ids, is_changed_cache):
-        self.dynprompt = dynprompt
-        self.cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
-        self.is_changed_cache = is_changed_cache
-        self.initialized = True
+    def stage_node_execution(self):
+        assert self.staged_node_id is None
+        if self.is_empty():
+            return None, None, None
+        available = self.get_ready_nodes()
+        if len(available) == 0:
+            cycled_nodes = self.get_nodes_in_cycle()
+            # Because cycles composed entirely of static nodes are caught during initial validation,
+            # we will 'blame' the first node in the cycle that is not a static node.
+            blamed_node = cycled_nodes[0]
+            for node_id in cycled_nodes:
+                display_node_id = self.prompt[node_id]
+                if display_node_id != node_id:
+                    blamed_node = display_node_id
+                    break
+            ex = DependencyCycleError("Dependency cycle detected")
+            error_details = {
+                "node_id": blamed_node,
+                "exception_message": str(ex),
+                "exception_type": "graph.DependencyCycleError",
+                "traceback": [],
+                "current_inputs": [],
+            }
+            return None, error_details, ex
 
-    def all_node_ids(self):
-        assert self.initialized
-        node_ids = self.cache_key_set.all_node_ids()
-        for subcache in self.subcaches.values():
-            node_ids = node_ids.union(subcache.all_node_ids())
-        return node_ids
+        self.staged_node_id = self.ux_friendly_pick_node(available)
+        return self.staged_node_id, None, None
 
-    def _clean_cache(self):
-        preserve_keys = set(self.cache_key_set.get_used_keys())
-        to_remove = []
-        for key in self.cache:
-            if key not in preserve_keys:
-                to_remove.append(key)
-        for key in to_remove:
-            del self.cache[key]
+    def ux_friendly_pick_node(self, node_list):
+        # If an output node is available, do that first.
+        # Technically this has no effect on the overall length of execution, but it feels better as a user
+        # for a PreviewImage to display a result as soon as it can
+        # Some other heuristics could probably be used here to improve the UX further.
+        def is_output(node_id):
+            class_type = self.prompt[node_id]["class_type"]
+            class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+            if hasattr(class_def, "OUTPUT_NODE") and class_def.OUTPUT_NODE == True:
+                return True
+            return False
 
-    def _clean_subcaches(self):
-        preserve_subcaches = set(self.cache_key_set.get_used_subcache_keys())
+        for node_id in node_list:
+            if is_output(node_id):
+                return node_id
 
-        to_remove = []
-        for key in self.subcaches:
-            if key not in preserve_subcaches:
-                to_remove.append(key)
-        for key in to_remove:
-            del self.subcaches[key]
+        # This should handle the VAEDecode -> preview case
+        for node_id in node_list:
+            for blocked_node_id in self.blocking[node_id]:
+                if is_output(blocked_node_id):
+                    return node_id
 
-    def clean_unused(self):
-        assert self.initialized
-        self._clean_cache()
-        self._clean_subcaches()
+        # This should handle the VAELoader -> VAEDecode -> preview case
+        for node_id in node_list:
+            for blocked_node_id in self.blocking[node_id]:
+                for blocked_node_id1 in self.blocking[blocked_node_id]:
+                    if is_output(blocked_node_id1):
+                        return node_id
 
-    def _set_immediate(self, node_id, value):
-        assert self.initialized
-        cache_key = self.cache_key_set.get_data_key(node_id)
-        self.cache[cache_key] = value
+        # TODO: this function should be improved
+        return node_list[0]
 
-    def _get_immediate(self, node_id):
-        if not self.initialized:
-            return None
-        cache_key = self.cache_key_set.get_data_key(node_id)
-        if cache_key in self.cache:
-            return self.cache[cache_key]
-        else:
-            return None
+    def unstage_node_execution(self):
+        assert self.staged_node_id is not None
+        self.staged_node_id = None
 
-    def _ensure_subcache(self, node_id, children_ids):
-        subcache_key = self.cache_key_set.get_subcache_key(node_id)
-        subcache = self.subcaches.get(subcache_key, None)
-        if subcache is None:
-            subcache = BasicCache(self.key_class)
-            self.subcaches[subcache_key] = subcache
-        subcache.set_prompt(self.dynprompt, children_ids, self.is_changed_cache)
-        return subcache
+    def complete_node_execution(self):
+        node_id = self.staged_node_id
+        self.pop_node(node_id)
+        self.staged_node_id = None
 
-    def _get_subcache(self, node_id):
-        assert self.initialized
-        subcache_key = self.cache_key_set.get_subcache_key(node_id)
-        if subcache_key in self.subcaches:
-            return self.subcaches[subcache_key]
-        else:
-            return None
+    def get_nodes_in_cycle(self):
+        # We'll dissolve the graph in reverse topological order to leave only the nodes in the cycle.
+        # We're skipping some of the performance optimizations from the original TopologicalSort to keep
+        # the code simple (and because having a cycle in the first place is a catastrophic error)
+        blocked_by = {node_id: {} for node_id in self.pendingNodes}
+        for from_node_id in self.blocking:
+            for to_node_id in self.blocking[from_node_id]:
+                if True in self.blocking[from_node_id][to_node_id].values():
+                    blocked_by[to_node_id][from_node_id] = True
+        to_remove = [node_id for node_id in blocked_by if len(blocked_by[node_id]) == 0]
+        while len(to_remove) > 0:
+            for node_id in to_remove:
+                for to_node_id in blocked_by:
+                    if node_id in blocked_by[to_node_id]:
+                        del blocked_by[to_node_id][node_id]
+                del blocked_by[node_id]
+            to_remove = [
+                node_id for node_id in blocked_by if len(blocked_by[node_id]) == 0
+            ]
+        return list(blocked_by.keys())
 
-    def recursive_debug_dump(self):
-        result = []
-        for key in self.cache:
-            result.append({"key": key, "value": self.cache[key]})
-        for key in self.subcaches:
-            result.append({"subcache_key": key, "subcache": self.subcaches[key].recursive_debug_dump()})
-        return result
 
-class HierarchicalCache(BasicCache):
-    def __init__(self, key_class):
-        super().__init__(key_class)
+class ExecutionBlocker:
+    """
+    Return this from a node and any users will be blocked with the given error message.
+    If the message is None, execution will be blocked silently instead.
+    Generally, you should avoid using this functionality unless absolutely necessary. Whenever it's
+    possible, a lazy input will be more efficient and have a better user experience.
+    This functionality is useful in two cases:
+    1. You want to conditionally prevent an output node from executing. (Particularly a built-in node
+       like SaveImage. For your own output nodes, I would recommend just adding a BOOL input and using
+       lazy evaluation to let it conditionally disable itself.)
+    2. You have a node with multiple possible outputs, some of which are invalid and should not be used.
+       (I would recommend not making nodes like this in the future -- instead, make multiple nodes with
+       different outputs. Unfortunately, there are several popular existing nodes using this pattern.)
+    """
 
-    def _get_cache_for(self, node_id):
-        assert self.dynprompt is not None
-        parent_id = self.dynprompt.get_parent_node_id(node_id)
-        if parent_id is None:
-            return self
-
-        hierarchy = []
-        while parent_id is not None:
-            hierarchy.append(parent_id)
-            parent_id = self.dynprompt.get_parent_node_id(parent_id)
-
-        cache = self
-        for parent_id in reversed(hierarchy):
-            cache = cache._get_subcache(parent_id)
-            if cache is None:
-                return None
-        return cache
-
-    def get(self, node_id):
-        cache = self._get_cache_for(node_id)
-        if cache is None:
-            return None
-        return cache._get_immediate(node_id)
-
-    def set(self, node_id, value):
-        cache = self._get_cache_for(node_id)
-        assert cache is not None
-        cache._set_immediate(node_id, value)
-
-    def ensure_subcache_for(self, node_id, children_ids):
-        cache = self._get_cache_for(node_id)
-        assert cache is not None
-        return cache._ensure_subcache(node_id, children_ids)
-
-class LRUCache(BasicCache):
-    def __init__(self, key_class, max_size=100):
-        super().__init__(key_class)
-        self.max_size = max_size
-        self.min_generation = 0
-        self.generation = 0
-        self.used_generation = {}
-        self.children = {}
-
-    def set_prompt(self, dynprompt, node_ids, is_changed_cache):
-        super().set_prompt(dynprompt, node_ids, is_changed_cache)
-        self.generation += 1
-        for node_id in node_ids:
-            self._mark_used(node_id)
-
-    def clean_unused(self):
-        while len(self.cache) > self.max_size and self.min_generation < self.generation:
-            self.min_generation += 1
-            to_remove = [key for key in self.cache if self.used_generation[key] < self.min_generation]
-            for key in to_remove:
-                del self.cache[key]
-                del self.used_generation[key]
-                if key in self.children:
-                    del self.children[key]
-        self._clean_subcaches()
-
-    def get(self, node_id):
-        self._mark_used(node_id)
-        return self._get_immediate(node_id)
-
-    def _mark_used(self, node_id):
-        cache_key = self.cache_key_set.get_data_key(node_id)
-        if cache_key is not None:
-            self.used_generation[cache_key] = self.generation
-
-    def set(self, node_id, value):
-        self._mark_used(node_id)
-        return self._set_immediate(node_id, value)
-
-    def ensure_subcache_for(self, node_id, children_ids):
-        # Just uses subcaches for tracking 'live' nodes
-        super()._ensure_subcache(node_id, children_ids)
-
-        self.cache_key_set.add_keys(children_ids)
-        self._mark_used(node_id)
-        cache_key = self.cache_key_set.get_data_key(node_id)
-        self.children[cache_key] = []
-        for child_id in children_ids:
-            self._mark_used(child_id)
-            self.children[cache_key].append(self.cache_key_set.get_data_key(child_id))
-        return self
-
+    def __init__(self, message):
+        self.message = message

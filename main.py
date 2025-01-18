@@ -131,13 +131,13 @@ if args.windows_standalone_build:
     except:
         pass
 
-import comfy.utils
 
-import execution
 import server
-from server import BinaryEventTypes
 import nodes
 import comfy.model_management
+import comfyui_version
+import app.logger
+
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
@@ -150,63 +150,6 @@ def cuda_malloc_warning():
         if cuda_malloc_warning:
             logging.warning("\nWARNING: this card most likely does not support cuda-malloc, if you get \"CUDA error\" please run ComfyUI with: --disable-cuda-malloc\n")
 
-
-def prompt_worker(q, server_instance):
-    current_time: float = 0.0
-    e = execution.PromptExecutor(server_instance, lru_size=args.cache_lru)
-    last_gc_collect = 0
-    need_gc = False
-    gc_collect_interval = 10.0
-
-    while True:
-        timeout = 1000.0
-        if need_gc:
-            timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
-
-        queue_item = q.get(timeout=timeout)
-        if queue_item is not None:
-            item, item_id = queue_item
-            execution_start_time = time.perf_counter()
-            prompt_id = item[1]
-            server_instance.last_prompt_id = prompt_id
-
-            e.execute(item[2], prompt_id, item[3], item[4])
-            need_gc = True
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages))
-            if server_instance.client_id is not None:
-                server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
-
-            current_time = time.perf_counter()
-            execution_time = current_time - execution_start_time
-            logging.info("Prompt executed in {:.2f} seconds".format(execution_time))
-
-        flags = q.get_flags()
-        free_memory = flags.get("free_memory", False)
-
-        if flags.get("unload_models", free_memory):
-            comfy.model_management.unload_all_models()
-            need_gc = True
-            last_gc_collect = 0
-
-        if free_memory:
-            e.reset()
-            need_gc = True
-            last_gc_collect = 0
-
-        if need_gc:
-            current_time = time.perf_counter()
-            if (current_time - last_gc_collect) > gc_collect_interval:
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
-                last_gc_collect = current_time
-                need_gc = False
-
-
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
     addresses = []
     for addr in address.split(","):
@@ -214,18 +157,6 @@ async def run(server_instance, address='', port=8188, verbose=True, call_on_star
     await asyncio.gather(
         server_instance.start_multi_address(addresses, call_on_start, verbose), server_instance.publish_loop()
     )
-
-
-def hijack_progress(server_instance):
-    def hook(value, total, preview_image):
-        comfy.model_management.throw_exception_if_processing_interrupted()
-        progress = {"value": value, "max": total, "prompt_id": server_instance.last_prompt_id, "node": server_instance.last_node_id}
-
-        server_instance.send_sync("progress", progress, server_instance.client_id)
-        if preview_image is not None:
-            server_instance.send_sync(BinaryEventTypes.UNENCODED_PREVIEW_IMAGE, preview_image, server_instance.client_id)
-
-    comfy.utils.set_progress_bar_global_hook(hook)
 
 
 def cleanup_temp():
@@ -255,17 +186,14 @@ def start_comfyui(asyncio_loop=None):
     if not asyncio_loop:
         asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(asyncio_loop)
+
     prompt_server = server.PromptServer(asyncio_loop)
-    q = execution.PromptQueue(prompt_server)
 
     nodes.init_extra_nodes(init_custom_nodes=not args.disable_all_custom_nodes)
 
     cuda_malloc_warning()
 
     prompt_server.add_routes()
-    hijack_progress(prompt_server)
-
-    threading.Thread(target=prompt_worker, daemon=True, args=(q, prompt_server,)).start()
 
     if args.quick_test_for_ci:
         exit(0)

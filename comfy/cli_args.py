@@ -43,10 +43,11 @@ parser.add_argument("--tls-certfile", type=str, help="Path to TLS (SSL) certific
 parser.add_argument("--enable-cors-header", type=str, default=None, metavar="ORIGIN", nargs="?", const="*", help="Enable CORS (Cross-Origin Resource Sharing) with optional origin or allow all with default '*'.")
 parser.add_argument("--max-upload-size", type=float, default=100, help="Set the maximum upload size in MB.")
 
+parser.add_argument("--base-directory", type=str, default=None, help="Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.")
 parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+', action='append', help="Load one or more extra_model_paths.yaml files.")
-parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory.")
-parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory).")
-parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory.")
+parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory. Overrides --base-directory.")
+parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory). Overrides --base-directory.")
+parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory. Overrides --base-directory.")
 parser.add_argument("--auto-launch", action="store_true", help="Automatically launch ComfyUI in the default browser.")
 parser.add_argument("--disable-auto-launch", action="store_true", help="Disable auto launching the browser.")
 parser.add_argument("--cuda-device", type=int, default=None, metavar="DEVICE_ID", help="Set the id of the cuda device this instance will use.")
@@ -129,7 +130,7 @@ parser.add_argument("--default-hashing-function", type=str, choices=['md5', 'sha
 
 parser.add_argument("--disable-smart-memory", action="store_true", help="Force ComfyUI to agressively offload to regular ram instead of keeping models in vram when it can.")
 parser.add_argument("--deterministic", action="store_true", help="Make pytorch use slower deterministic algorithms when it can. Note that this might not make images deterministic in all cases.")
-parser.add_argument("--fast", action="store_true", help="Enable some untested and potentially quality deteriorating optimizations.")
+parser.add_argument("--fast", metavar="number", type=int, const=99, default=0, nargs="?", help="Enable some untested and potentially quality deteriorating optimizations. You can pass a number from 0 to 10 for a bigger speed vs quality tradeoff. Using --fast with no number means maximum speed. 2 or larger enables fp16 accumulation, 5 or larger enables fp8 matrix multiplication.")
 
 parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
 parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
@@ -176,7 +177,9 @@ parser.add_argument(
     help="The local filesystem path to the directory where the frontend is located. Overrides --front-end-version.",
 )
 
-parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path.")
+parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path. Overrides --base-directory.")
+
+parser.add_argument("--enable-compress-response-body", action="store_true", help="Enable compressing response body.")
 
 if comfy.options.args_parsing:
     args = parser.parse_args()
@@ -188,3 +191,6 @@ if args.windows_standalone_build:
 
 if args.disable_auto_launch:
     args.auto_launch = False
+
+if args.force_fp16:
+    args.fp16_unet = True

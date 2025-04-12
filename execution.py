@@ -52,6 +52,7 @@ class IsChangedCache:
             self.is_changed[node_id] = node["is_changed"]
         return self.is_changed[node_id]
 
+
 def get_input_data(inputs, class_def, unique_id, outputs=None, prompt=None, extra_data={}):
     valid_inputs = class_def.INPUT_TYPES()
     input_data_all = {}
@@ -259,6 +260,7 @@ def execute_node(outputs, messages, client_id, prompt, current_item, extra_data,
 
     return (ExecutionResult.SUCCESS, None, None)
 
+
 @ray.remote
 def execute_prompt(messages, cache, client_id, prompt_id, prompt, extra_data={}, execute_outputs=[]):
     messages.add.remote("execution_started", { "prompt_id": prompt_id}, client_id, broadcast=False)
@@ -425,6 +427,13 @@ def validate_inputs(prompt, item, validated):
                 continue
         else:
             try:
+                # Unwraps values wrapped in __value__ key. This is used to pass
+                # list widget value to execution, as by default list value is
+                # reserved to represent the connection between nodes.
+                if isinstance(val, dict) and "__value__" in val:
+                    val = val["__value__"]
+                    inputs[x] = val
+
                 if type_input == "INT":
                     val = int(val)
                     inputs[x] = val
@@ -559,7 +568,7 @@ def validate_prompt(prompt):
                 "details": f"Node ID '#{x}'",
                 "extra_info": {}
             }
-            return (False, error, [], [])
+            return (False, error, [], {})
 
         class_type = prompt[x]['class_type']
         class_ = nodes.NODE_CLASS_MAPPINGS.get(class_type, None)
@@ -570,7 +579,7 @@ def validate_prompt(prompt):
                 "details": f"Node ID '#{x}'",
                 "extra_info": {}
             }
-            return (False, error, [], [])
+            return (False, error, [], {})
 
         if hasattr(class_, 'OUTPUT_NODE') and class_.OUTPUT_NODE is True:
             outputs.add(x)
@@ -582,7 +591,7 @@ def validate_prompt(prompt):
             "details": "",
             "extra_info": {}
         }
-        return (False, error, [], [])
+        return (False, error, [], {})
 
     good_outputs = set()
     errors = []

@@ -136,6 +136,7 @@ import server
 import nodes
 import comfy.model_management
 import comfyui_version
+import app.logger
 
 
 def cuda_malloc_warning():
@@ -148,6 +149,7 @@ def cuda_malloc_warning():
                 cuda_malloc_warning = True
         if cuda_malloc_warning:
             logging.warning("\nWARNING: this card most likely does not support cuda-malloc, if you get \"CUDA error\" please run ComfyUI with: --disable-cuda-malloc\n")
+
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
     addresses = []
@@ -220,9 +222,12 @@ def start_comfyui(asyncio_loop=None):
 if __name__ == "__main__":
     # Running directly, just start ComfyUI.
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
+
     event_loop, _, start_all_func = start_comfyui()
     try:
-        event_loop.run_until_complete(start_all_func())
+        x = start_all_func()
+        app.logger.print_startup_warnings()
+        event_loop.run_until_complete(x)
     except KeyboardInterrupt:
         logging.info("\nStopped server")
 

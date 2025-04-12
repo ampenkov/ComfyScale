@@ -69,6 +69,8 @@ See what ComfyUI can do with the [example workflows](https://comfyanonymous.gith
    - [Hunyuan Video](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/)
    - [Nvidia Cosmos](https://comfyanonymous.github.io/ComfyUI_examples/cosmos/)
    - [Wan 2.1](https://comfyanonymous.github.io/ComfyUI_examples/wan/)
+- 3D Models
+   - [Hunyuan3D 2.0](https://docs.comfy.org/tutorials/3d/hunyuan3D-2)
 - [Stable Audio](https://comfyanonymous.github.io/ComfyUI_examples/audio/)
 - Asynchronous Queue system
 - Many optimizations: Only re-executes the parts of the workflow that changes between executions.
@@ -215,9 +217,9 @@ Nvidia users should install stable pytorch using this command:
 
 ```pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu126```
 
-This is the command to install pytorch nightly instead which might have performance improvements:
+This is the command to install pytorch nightly instead which supports the new blackwell 50xx series GPUs and might have performance improvements.
 
-```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126```
+```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128```
 
 #### Troubleshooting
 

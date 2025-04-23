@@ -102,8 +102,6 @@ execute_prestartup_script()
 # Main code
 import asyncio
 import shutil
-import threading
-import gc
 
 
 if os.name == "nt":

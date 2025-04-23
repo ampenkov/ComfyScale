@@ -1,6 +1,5 @@
 import os
 import sys
-import asyncio
 import traceback
 
 import nodes
@@ -35,6 +34,10 @@ from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
+from comfy_execution.caching import LRUCache
+from message_queue import MessageQueue
+from execution import execute_prompt
+
 class BinaryEventTypes:
     PREVIEW_IMAGE = 1
     UNENCODED_PREVIEW_IMAGE = 2
@@ -48,7 +51,7 @@ async def send_socket_catch_exception(function, message):
 @web.middleware
 async def cache_control(request: web.Request, handler):
     response: web.Response = await handler(request)
-    if request.path.endswith('.js') or request.path.endswith('.css') or request.path.endswith('index.json'):
+    if request.path.endswith('.js') or request.path.endswith('.css'):
         response.headers.setdefault('Cache-Control', 'no-cache')
     return response
 
@@ -153,14 +156,14 @@ class PromptServer():
         mimetypes.add_type('application/javascript; charset=utf-8', '.js')
         mimetypes.add_type('image/webp', '.webp')
 
+        self.cache = LRUCache.remote()
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
         self.custom_node_manager = CustomNodeManager()
         self.internal_routes = InternalRoutes(self)
         self.supports = ["custom_nodes_from_web"]
-        self.prompt_queue = None
         self.loop = loop
-        self.messages = asyncio.Queue()
+        self.messages = MessageQueue.remote()
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
@@ -203,12 +206,6 @@ class PromptServer():
             self.sockets[sid] = ws
 
             try:
-                # Send initial state to the new client
-                await self.send("status", { "status": self.get_queue_info(), 'sid': sid }, sid)
-                # On reconnect if we are the currently executing client send the current node
-                if self.client_id == sid and self.last_node_id is not None:
-                    await self.send("executing", { "node": self.last_node_id }, sid)
-
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.ERROR:
                         logging.warning('ws connection closed with exception %s' % ws.exception())
@@ -548,10 +545,6 @@ class PromptServer():
             }
             return web.json_response(system_stats)
 
-        @routes.get("/prompt")
-        async def get_prompt(request):
-            return web.json_response(self.get_queue_info())
-
         def node_info(node_class):
             obj_class = nodes.NODE_CLASS_MAPPINGS[node_class]
             info = {}
@@ -602,26 +595,6 @@ class PromptServer():
                 out[node_class] = node_info(node_class)
             return web.json_response(out)
 
-        @routes.get("/history")
-        async def get_history(request):
-            max_items = request.rel_url.query.get("max_items", None)
-            if max_items is not None:
-                max_items = int(max_items)
-            return web.json_response(self.prompt_queue.get_history(max_items=max_items))
-
-        @routes.get("/history/{prompt_id}")
-        async def get_history_prompt_id(request):
-            prompt_id = request.match_info.get("prompt_id", None)
-            return web.json_response(self.prompt_queue.get_history(prompt_id=prompt_id))
-
-        @routes.get("/queue")
-        async def get_queue(request):
-            queue_info = {}
-            current_queue = self.prompt_queue.get_current_queue()
-            queue_info['queue_running'] = current_queue[0]
-            queue_info['queue_pending'] = current_queue[1]
-            return web.json_response(queue_info)
-
         @routes.post("/prompt")
         async def post_prompt(request):
             logging.info("got prompt")
@@ -648,65 +621,17 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
                 if valid[0]:
+                    client_id = extra_data.get("client_id", None)
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute))
+                    execute_prompt.remote(self.messages, self.cache, client_id, prompt_id, prompt, extra_data, outputs_to_execute)
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
                     logging.warning("invalid prompt: {}".format(valid[1]))
                     return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
             else:
-                error = {
-                    "type": "no_prompt",
-                    "message": "No prompt provided",
-                    "details": "No prompt provided",
-                    "extra_info": {}
-                }
-                return web.json_response({"error": error, "node_errors": {}}, status=400)
-
-        @routes.post("/queue")
-        async def post_queue(request):
-            json_data =  await request.json()
-            if "clear" in json_data:
-                if json_data["clear"]:
-                    self.prompt_queue.wipe_queue()
-            if "delete" in json_data:
-                to_delete = json_data['delete']
-                for id_to_delete in to_delete:
-                    delete_func = lambda a: a[1] == id_to_delete
-                    self.prompt_queue.delete_queue_item(delete_func)
-
-            return web.Response(status=200)
-
-        @routes.post("/interrupt")
-        async def post_interrupt(request):
-            nodes.interrupt_processing()
-            return web.Response(status=200)
-
-        @routes.post("/free")
-        async def post_free(request):
-            json_data = await request.json()
-            unload_models = json_data.get("unload_models", False)
-            free_memory = json_data.get("free_memory", False)
-            if unload_models:
-                self.prompt_queue.set_flag("unload_models", unload_models)
-            if free_memory:
-                self.prompt_queue.set_flag("free_memory", free_memory)
-            return web.Response(status=200)
-
-        @routes.post("/history")
-        async def post_history(request):
-            json_data =  await request.json()
-            if "clear" in json_data:
-                if json_data["clear"]:
-                    self.prompt_queue.wipe_history()
-            if "delete" in json_data:
-                to_delete = json_data['delete']
-                for id_to_delete in to_delete:
-                    self.prompt_queue.delete_history_item(id_to_delete)
-
-            return web.Response(status=200)
+                return web.json_response({"error": "no prompt", "node_errors": []}, status=400)
 
     async def setup(self):
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
@@ -736,22 +661,9 @@ class PromptServer():
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
             self.app.add_routes([web.static('/extensions/' + name, dir)])
 
-        workflow_templates_path = FrontendManager.templates_path()
-        if workflow_templates_path:
-            self.app.add_routes([
-                web.static('/templates', workflow_templates_path)
-            ])
-
         self.app.add_routes([
             web.static('/', self.web_root),
         ])
-
-    def get_queue_info(self):
-        prompt_info = {}
-        exec_info = {}
-        exec_info['queue_remaining'] = self.prompt_queue.get_tasks_remaining()
-        prompt_info['exec_info'] = exec_info
-        return prompt_info
 
     async def send(self, event, data, sid=None):
         if event == BinaryEventTypes.UNENCODED_PREVIEW_IMAGE:
@@ -814,17 +726,11 @@ class PromptServer():
         elif sid in self.sockets:
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
-    def send_sync(self, event, data, sid=None):
-        self.loop.call_soon_threadsafe(
-            self.messages.put_nowait, (event, data, sid))
-
-    def queue_updated(self):
-        self.send_sync("status", { "status": self.get_queue_info() })
-
     async def publish_loop(self):
         while True:
-            msg = await self.messages.get()
-            await self.send(*msg)
+            msgs = await self.messages.get.remote()
+            for msg in msgs:
+                await self.send(*msg)
 
     async def start(self, address, port, verbose=True, call_on_start=None):
         await self.start_multi_address([(address, port)], call_on_start=call_on_start)

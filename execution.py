@@ -1,35 +1,28 @@
 import sys
-import copy
 import logging
-import threading
-import heapq
-import time
 import traceback
 from enum import Enum
 import inspect
-from typing import List, Literal, NamedTuple, Optional
 
-import torch
+import ray
+
 import nodes
 
 import comfy.model_management
-from comfy_execution.graph import get_input_info, ExecutionList, DynamicPrompt, ExecutionBlocker
+from comfy_execution.graph import get_input_info, ExecutionList, ExecutionBlocker
 from comfy_execution.graph_utils import is_link, GraphBuilder
-from comfy_execution.caching import HierarchicalCache, LRUCache, DependencyAwareCache, CacheKeySetInputSignature, CacheKeySetID
 from comfy_execution.validation import validate_node_input
 
 class ExecutionResult(Enum):
     SUCCESS = 0
     FAILURE = 1
-    PENDING = 2
 
 class DuplicateNodeError(Exception):
     pass
 
 class IsChangedCache:
-    def __init__(self, dynprompt, outputs_cache):
+    def __init__(self, dynprompt):
         self.dynprompt = dynprompt
-        self.outputs_cache = outputs_cache
         self.is_changed = {}
 
     def get(self, node_id):
@@ -59,53 +52,7 @@ class IsChangedCache:
             self.is_changed[node_id] = node["is_changed"]
         return self.is_changed[node_id]
 
-
-class CacheType(Enum):
-    CLASSIC = 0
-    LRU = 1
-    DEPENDENCY_AWARE = 2
-
-
-class CacheSet:
-    def __init__(self, cache_type=None, cache_size=None):
-        if cache_type == CacheType.DEPENDENCY_AWARE:
-            self.init_dependency_aware_cache()
-            logging.info("Disabling intermediate node cache.")
-        elif cache_type == CacheType.LRU:
-            if cache_size is None:
-                cache_size = 0
-            self.init_lru_cache(cache_size)
-            logging.info("Using LRU cache")
-        else:
-            self.init_classic_cache()
-
-        self.all = [self.outputs, self.ui, self.objects]
-
-    # Performs like the old cache -- dump data ASAP
-    def init_classic_cache(self):
-        self.outputs = HierarchicalCache(CacheKeySetInputSignature)
-        self.ui = HierarchicalCache(CacheKeySetInputSignature)
-        self.objects = HierarchicalCache(CacheKeySetID)
-
-    def init_lru_cache(self, cache_size):
-        self.outputs = LRUCache(CacheKeySetInputSignature, max_size=cache_size)
-        self.ui = LRUCache(CacheKeySetInputSignature, max_size=cache_size)
-        self.objects = HierarchicalCache(CacheKeySetID)
-
-    # only hold cached items while the decendents have not executed
-    def init_dependency_aware_cache(self):
-        self.outputs = DependencyAwareCache(CacheKeySetInputSignature)
-        self.ui = DependencyAwareCache(CacheKeySetInputSignature)
-        self.objects = DependencyAwareCache(CacheKeySetID)
-
-    def recursive_debug_dump(self):
-        result = {
-            "outputs": self.outputs.recursive_debug_dump(),
-            "ui": self.ui.recursive_debug_dump(),
-        }
-        return result
-
-def get_input_data(inputs, class_def, unique_id, outputs=None, dynprompt=None, extra_data={}):
+def get_input_data(inputs, class_def, unique_id, outputs=None, prompt=None, extra_data={}):
     valid_inputs = class_def.INPUT_TYPES()
     input_data_all = {}
     missing_keys = {}
@@ -137,20 +84,16 @@ def get_input_data(inputs, class_def, unique_id, outputs=None, dynprompt=None, e
         h = valid_inputs["hidden"]
         for x in h:
             if h[x] == "PROMPT":
-                input_data_all[x] = [dynprompt.get_original_prompt() if dynprompt is not None else {}]
-            if h[x] == "DYNPROMPT":
-                input_data_all[x] = [dynprompt]
+                input_data_all[x] = [prompt if prompt is not None else {}]
             if h[x] == "EXTRA_PNGINFO":
                 input_data_all[x] = [extra_data.get('extra_pnginfo', None)]
             if h[x] == "UNIQUE_ID":
                 input_data_all[x] = [unique_id]
-            if h[x] == "AUTH_TOKEN_COMFY_ORG":
-                input_data_all[x] = [extra_data.get("auth_token_comfy_org", None)]
     return input_data_all, missing_keys
 
 map_node_over_list = None #Don't hook this please
 
-def _map_node_over_list(obj, input_data_all, func, allow_interrupt=False, execution_block_cb=None, pre_execute_cb=None):
+def _map_node_over_list(obj, input_data_all, func, execution_block_cb=None, pre_execute_cb=None):
     # check if node wants the lists
     input_is_list = getattr(obj, "INPUT_IS_LIST", False)
 
@@ -165,8 +108,6 @@ def _map_node_over_list(obj, input_data_all, func, allow_interrupt=False, execut
 
     results = []
     def process_inputs(inputs, index=None, input_is_list=False):
-        if allow_interrupt:
-            nodes.before_node_execution()
         execution_block = None
         for k, v in inputs.items():
             if input_is_list:
@@ -180,7 +121,11 @@ def _map_node_over_list(obj, input_data_all, func, allow_interrupt=False, execut
         if execution_block is None:
             if pre_execute_cb is not None and index is not None:
                 pre_execute_cb(index)
-            results.append(getattr(obj, func)(**inputs))
+
+            if func in {"IS_CHANGED", "VALIDATE_INPUTS"}:
+                results.append(getattr(obj, func)(**inputs))
+            else:
+                results.append(getattr(obj, func).remote(**dict(inputs, self=obj)))
         else:
             results.append(execution_block)
 
@@ -217,45 +162,20 @@ def merge_result_data(results, obj):
 
 def get_output_data(obj, input_data_all, execution_block_cb=None, pre_execute_cb=None):
     results = []
-    uis = []
-    subgraph_results = []
-    return_values = _map_node_over_list(obj, input_data_all, obj.FUNCTION, allow_interrupt=True, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
-    has_subgraph = False
+    return_values = _map_node_over_list(obj, input_data_all, obj.FUNCTION, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
+
     for i in range(len(return_values)):
         r = return_values[i]
-        if isinstance(r, dict):
-            if 'ui' in r:
-                uis.append(r['ui'])
-            if 'expand' in r:
-                # Perform an expansion, but do not append results
-                has_subgraph = True
-                new_graph = r['expand']
-                result = r.get("result", None)
-                if isinstance(result, ExecutionBlocker):
-                    result = tuple([result] * len(obj.RETURN_TYPES))
-                subgraph_results.append((new_graph, result))
-            elif 'result' in r:
-                result = r.get("result", None)
-                if isinstance(result, ExecutionBlocker):
-                    result = tuple([result] * len(obj.RETURN_TYPES))
-                results.append(result)
-                subgraph_results.append((None, result))
-        else:
-            if isinstance(r, ExecutionBlocker):
-                r = tuple([r] * len(obj.RETURN_TYPES))
-            results.append(r)
-            subgraph_results.append((None, r))
+        if isinstance(r, ExecutionBlocker):
+            r = tuple([r] * len(obj.RETURN_TYPES))
+        results.append(r)
 
-    if has_subgraph:
-        output = subgraph_results
-    elif len(results) > 0:
+    if len(results) > 0:
         output = merge_result_data(results, obj)
     else:
         output = []
-    ui = dict()
-    if len(uis) > 0:
-        ui = {k: [y for x in uis for y in x[k]] for k in uis[0].keys()}
-    return output, ui, has_subgraph
+
+    return output
 
 def format_value(x):
     if x is None:
@@ -265,144 +185,50 @@ def format_value(x):
     else:
         return str(x)
 
-def execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results):
+def execute_node(outputs, messages, client_id, prompt, current_item, extra_data, executed, prompt_id):
     unique_id = current_item
-    real_node_id = dynprompt.get_real_node_id(unique_id)
-    display_node_id = dynprompt.get_display_node_id(unique_id)
-    parent_node_id = dynprompt.get_parent_node_id(unique_id)
-    inputs = dynprompt.get_node(unique_id)['inputs']
-    class_type = dynprompt.get_node(unique_id)['class_type']
+    inputs = prompt[unique_id]['inputs']
+    class_type = prompt[unique_id]['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    if caches.outputs.get(unique_id) is not None:
-        if server.client_id is not None:
-            cached_output = caches.ui.get(unique_id) or {}
-            server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": cached_output.get("output",None), "prompt_id": prompt_id }, server.client_id)
+    if outputs.get(unique_id) is not None:
+        if client_id is not None:
+            messages.add.remote("node_cached", { "node": unique_id, "prompt_id": prompt_id }, client_id)
         return (ExecutionResult.SUCCESS, None, None)
 
     input_data_all = None
     try:
-        if unique_id in pending_subgraph_results:
-            cached_results = pending_subgraph_results[unique_id]
-            resolved_outputs = []
-            for is_subgraph, result in cached_results:
-                if not is_subgraph:
-                    resolved_outputs.append(result)
-                else:
-                    resolved_output = []
-                    for r in result:
-                        if is_link(r):
-                            source_node, source_output = r[0], r[1]
-                            node_output = caches.outputs.get(source_node)[source_output]
-                            for o in node_output:
-                                resolved_output.append(o)
+        input_data_all, _ = get_input_data(inputs, class_def, unique_id, outputs, prompt, extra_data)
+        obj = class_def()
 
-                        else:
-                            resolved_output.append(r)
-                    resolved_outputs.append(tuple(resolved_output))
-            output_data = merge_result_data(resolved_outputs, class_def)
-            output_ui = []
-            has_subgraph = False
-        else:
-            input_data_all, missing_keys = get_input_data(inputs, class_def, unique_id, caches.outputs, dynprompt, extra_data)
-            if server.client_id is not None:
-                server.last_node_id = display_node_id
-                server.send_sync("executing", { "node": unique_id, "display_node": display_node_id, "prompt_id": prompt_id }, server.client_id)
-
-            obj = caches.objects.get(unique_id)
-            if obj is None:
-                obj = class_def()
-                caches.objects.set(unique_id, obj)
-
-            if hasattr(obj, "check_lazy_status"):
-                required_inputs = _map_node_over_list(obj, input_data_all, "check_lazy_status", allow_interrupt=True)
-                required_inputs = set(sum([r for r in required_inputs if isinstance(r,list)], []))
-                required_inputs = [x for x in required_inputs if isinstance(x,str) and (
-                    x not in input_data_all or x in missing_keys
-                )]
-                if len(required_inputs) > 0:
-                    for i in required_inputs:
-                        execution_list.make_input_strong_link(unique_id, i)
-                    return (ExecutionResult.PENDING, None, None)
-
-            def execution_block_cb(block):
-                if block.message is not None:
-                    mes = {
-                        "prompt_id": prompt_id,
-                        "node_id": unique_id,
-                        "node_type": class_type,
-                        "executed": list(executed),
-
-                        "exception_message": f"Execution Blocked: {block.message}",
-                        "exception_type": "ExecutionBlocked",
-                        "traceback": [],
-                        "current_inputs": [],
-                        "current_outputs": [],
-                    }
-                    server.send_sync("execution_error", mes, server.client_id)
-                    return ExecutionBlocker(None)
-                else:
-                    return block
-            def pre_execute_cb(call_index):
-                GraphBuilder.set_default_prefix(unique_id, call_index, 0)
-            output_data, output_ui, has_subgraph = get_output_data(obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
-        if len(output_ui) > 0:
-            caches.ui.set(unique_id, {
-                "meta": {
+        def execution_block_cb(block):
+            if block.message is not None:
+                mes = {
+                    "prompt_id": prompt_id,
                     "node_id": unique_id,
-                    "display_node": display_node_id,
-                    "parent_node": parent_node_id,
-                    "real_node_id": real_node_id,
-                },
-                "output": output_ui
-            })
-            if server.client_id is not None:
-                server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": output_ui, "prompt_id": prompt_id }, server.client_id)
-        if has_subgraph:
-            cached_outputs = []
-            new_node_ids = []
-            new_output_ids = []
-            new_output_links = []
-            for i in range(len(output_data)):
-                new_graph, node_outputs = output_data[i]
-                if new_graph is None:
-                    cached_outputs.append((False, node_outputs))
-                else:
-                    # Check for conflicts
-                    for node_id in new_graph.keys():
-                        if dynprompt.has_node(node_id):
-                            raise DuplicateNodeError(f"Attempt to add duplicate node {node_id}. Ensure node ids are unique and deterministic or use graph_utils.GraphBuilder.")
-                    for node_id, node_info in new_graph.items():
-                        new_node_ids.append(node_id)
-                        display_id = node_info.get("override_display_id", unique_id)
-                        dynprompt.add_ephemeral_node(node_id, node_info, unique_id, display_id)
-                        # Figure out if the newly created node is an output node
-                        class_type = node_info["class_type"]
-                        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-                        if hasattr(class_def, 'OUTPUT_NODE') and class_def.OUTPUT_NODE == True:
-                            new_output_ids.append(node_id)
-                    for i in range(len(node_outputs)):
-                        if is_link(node_outputs[i]):
-                            from_node_id, from_socket = node_outputs[i][0], node_outputs[i][1]
-                            new_output_links.append((from_node_id, from_socket))
-                    cached_outputs.append((True, node_outputs))
-            new_node_ids = set(new_node_ids)
-            for cache in caches.all:
-                cache.ensure_subcache_for(unique_id, new_node_ids).clean_unused()
-            for node_id in new_output_ids:
-                execution_list.add_node(node_id)
-            for link in new_output_links:
-                execution_list.add_strong_link(link[0], link[1], unique_id)
-            pending_subgraph_results[unique_id] = cached_outputs
-            return (ExecutionResult.PENDING, None, None)
-        caches.outputs.set(unique_id, output_data)
+                    "node_type": class_type,
+                    "executed": list(executed),
+
+                    "exception_message": f"Execution Blocked: {block.message}",
+                    "exception_type": "ExecutionBlocked",
+                    "traceback": [],
+                    "current_inputs": [],
+                    "current_outputs": [],
+                }
+                messages.add.remote("execution_failed", mes, client_id)
+                return ExecutionBlocker(None)
+            else:
+                return block
+        def pre_execute_cb(call_index):
+            GraphBuilder.set_default_prefix(unique_id, call_index, 0)
+        output_data = get_output_data(obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
+
+        if client_id is not None:
+            messages.add.remote("node_staged", { "node": unique_id, "prompt_id": prompt_id }, client_id)
+
+        outputs[unique_id] = output_data
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
-
-        # skip formatting inputs/outputs
-        error_details = {
-            "node_id": real_node_id,
-        }
-
+        error_details = {"node_id": unique_id}
         return (ExecutionResult.FAILURE, error_details, iex)
     except Exception as ex:
         typ, _, tb = sys.exc_info()
@@ -417,7 +243,7 @@ def execute(server, dynprompt, caches, current_item, extra_data, executed, promp
         logging.error(traceback.format_exc())
 
         error_details = {
-            "node_id": real_node_id,
+            "node_id": unique_id,
             "exception_message": str(ex),
             "exception_type": exception_type,
             "traceback": traceback.format_tb(tb),
@@ -433,124 +259,67 @@ def execute(server, dynprompt, caches, current_item, extra_data, executed, promp
 
     return (ExecutionResult.SUCCESS, None, None)
 
-class PromptExecutor:
-    def __init__(self, server, cache_type=False, cache_size=None):
-        self.cache_size = cache_size
-        self.cache_type = cache_type
-        self.server = server
-        self.reset()
+@ray.remote
+def execute_prompt(messages, cache, client_id, prompt_id, prompt, extra_data={}, execute_outputs=[]):
+    messages.add.remote("execution_started", { "prompt_id": prompt_id}, client_id, broadcast=False)
 
-    def reset(self):
-        self.caches = CacheSet(cache_type=self.cache_type, cache_size=self.cache_size)
-        self.status_messages = []
-        self.success = True
+    outputs = {}
 
-    def add_message(self, event, data: dict, broadcast: bool):
-        data = {
-            **data,
-            "timestamp": int(time.time() * 1000),
+    cached_nodes = ray.get(cache.get.remote(prompt))
+    for node_id, node in cached_nodes.items():
+        if node is not None:
+            outputs[node_id] = node
+
+    comfy.model_management.cleanup_models_gc()
+    messages.add.remote("execution_cached", {"nodes": list(outputs.keys()), "prompt_id": prompt_id}, client_id, broadcast=False)
+
+    executed = set()
+    execution_list = ExecutionList(prompt)
+
+    for node_id in list(execute_outputs):
+        execution_list.add_node(node_id)
+
+    while not execution_list.is_empty():
+        node_id, error, ex = execution_list.stage_node_execution()
+        if error is not None:
+            handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex)
+            break
+
+        result, error, ex = execute_node(outputs, messages, client_id, prompt, node_id, extra_data, executed, prompt_id)
+        if result == ExecutionResult.FAILURE:
+            handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex)
+            break
+        else: # result == ExecutionResult.SUCCESS:
+            execution_list.complete_node_execution()
+    else:
+        cache.set.remote(outputs, prompt)
+        messages.add.remote("execution_staged", { "prompt_id": prompt_id }, client_id, broadcast=False)
+
+
+def handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex):
+    node_id = error["node_id"]
+    class_type = prompt[node_id]["class_type"]
+
+    if isinstance(ex, comfy.model_management.InterruptProcessingException):
+        mes = {
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "node_type": class_type,
+            "executed": list(executed),
         }
-        self.status_messages.append((event, data))
-        if self.server.client_id is not None or broadcast:
-            self.server.send_sync(event, data, self.server.client_id)
-
-    def handle_execution_error(self, prompt_id, prompt, current_outputs, executed, error, ex):
-        node_id = error["node_id"]
-        class_type = prompt[node_id]["class_type"]
-
-        # First, send back the status to the frontend depending
-        # on the exception type
-        if isinstance(ex, comfy.model_management.InterruptProcessingException):
-            mes = {
-                "prompt_id": prompt_id,
-                "node_id": node_id,
-                "node_type": class_type,
-                "executed": list(executed),
-            }
-            self.add_message("execution_interrupted", mes, broadcast=True)
-        else:
-            mes = {
-                "prompt_id": prompt_id,
-                "node_id": node_id,
-                "node_type": class_type,
-                "executed": list(executed),
-                "exception_message": error["exception_message"],
-                "exception_type": error["exception_type"],
-                "traceback": error["traceback"],
-                "current_inputs": error["current_inputs"],
-                "current_outputs": list(current_outputs),
-            }
-            self.add_message("execution_error", mes, broadcast=False)
-
-    def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
-        nodes.interrupt_processing(False)
-
-        if "client_id" in extra_data:
-            self.server.client_id = extra_data["client_id"]
-        else:
-            self.server.client_id = None
-
-        self.status_messages = []
-        self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
-
-        with torch.inference_mode():
-            dynamic_prompt = DynamicPrompt(prompt)
-            is_changed_cache = IsChangedCache(dynamic_prompt, self.caches.outputs)
-            for cache in self.caches.all:
-                cache.set_prompt(dynamic_prompt, prompt.keys(), is_changed_cache)
-                cache.clean_unused()
-
-            cached_nodes = []
-            for node_id in prompt:
-                if self.caches.outputs.get(node_id) is not None:
-                    cached_nodes.append(node_id)
-
-            comfy.model_management.cleanup_models_gc()
-            self.add_message("execution_cached",
-                          { "nodes": cached_nodes, "prompt_id": prompt_id},
-                          broadcast=False)
-            pending_subgraph_results = {}
-            executed = set()
-            execution_list = ExecutionList(dynamic_prompt, self.caches.outputs)
-            current_outputs = self.caches.outputs.all_node_ids()
-            for node_id in list(execute_outputs):
-                execution_list.add_node(node_id)
-
-            while not execution_list.is_empty():
-                node_id, error, ex = execution_list.stage_node_execution()
-                if error is not None:
-                    self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
-                    break
-
-                result, error, ex = execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results)
-                self.success = result != ExecutionResult.FAILURE
-                if result == ExecutionResult.FAILURE:
-                    self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
-                    break
-                elif result == ExecutionResult.PENDING:
-                    execution_list.unstage_node_execution()
-                else: # result == ExecutionResult.SUCCESS:
-                    execution_list.complete_node_execution()
-            else:
-                # Only execute when the while-loop ends without break
-                self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
-
-            ui_outputs = {}
-            meta_outputs = {}
-            all_node_ids = self.caches.ui.all_node_ids()
-            for node_id in all_node_ids:
-                ui_info = self.caches.ui.get(node_id)
-                if ui_info is not None:
-                    ui_outputs[node_id] = ui_info["output"]
-                    meta_outputs[node_id] = ui_info["meta"]
-            self.history_result = {
-                "outputs": ui_outputs,
-                "meta": meta_outputs,
-            }
-            self.server.last_node_id = None
-            if comfy.model_management.DISABLE_SMART_MEMORY:
-                comfy.model_management.unload_all_models()
-
+        messages.add.remote("execution_interrupted", mes, client_id, broadcast=True)
+    else:
+        mes = {
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "node_type": class_type,
+            "executed": list(executed),
+            "exception_message": error["exception_message"],
+            "exception_type": error["exception_type"],
+            "traceback": error["traceback"],
+            "current_inputs": error["current_inputs"],
+        }
+        messages.add.remote("execution_failed", mes, client_id, broadcast=False)
 
 def validate_inputs(prompt, item, validated):
     unique_id = item
@@ -894,130 +663,3 @@ def validate_prompt(prompt):
         return (False, error, list(good_outputs), node_errors)
 
     return (True, None, list(good_outputs), node_errors)
-
-MAXIMUM_HISTORY_SIZE = 10000
-
-class PromptQueue:
-    def __init__(self, server):
-        self.server = server
-        self.mutex = threading.RLock()
-        self.not_empty = threading.Condition(self.mutex)
-        self.task_counter = 0
-        self.queue = []
-        self.currently_running = {}
-        self.history = {}
-        self.flags = {}
-        server.prompt_queue = self
-
-    def put(self, item):
-        with self.mutex:
-            heapq.heappush(self.queue, item)
-            self.server.queue_updated()
-            self.not_empty.notify()
-
-    def get(self, timeout=None):
-        with self.not_empty:
-            while len(self.queue) == 0:
-                self.not_empty.wait(timeout=timeout)
-                if timeout is not None and len(self.queue) == 0:
-                    return None
-            item = heapq.heappop(self.queue)
-            i = self.task_counter
-            self.currently_running[i] = copy.deepcopy(item)
-            self.task_counter += 1
-            self.server.queue_updated()
-            return (item, i)
-
-    class ExecutionStatus(NamedTuple):
-        status_str: Literal['success', 'error']
-        completed: bool
-        messages: List[str]
-
-    def task_done(self, item_id, history_result,
-                  status: Optional['PromptQueue.ExecutionStatus']):
-        with self.mutex:
-            prompt = self.currently_running.pop(item_id)
-            if len(self.history) > MAXIMUM_HISTORY_SIZE:
-                self.history.pop(next(iter(self.history)))
-
-            status_dict: Optional[dict] = None
-            if status is not None:
-                status_dict = copy.deepcopy(status._asdict())
-
-            self.history[prompt[1]] = {
-                "prompt": prompt,
-                "outputs": {},
-                'status': status_dict,
-            }
-            self.history[prompt[1]].update(history_result)
-            self.server.queue_updated()
-
-    def get_current_queue(self):
-        with self.mutex:
-            out = []
-            for x in self.currently_running.values():
-                out += [x]
-            return (out, copy.deepcopy(self.queue))
-
-    def get_tasks_remaining(self):
-        with self.mutex:
-            return len(self.queue) + len(self.currently_running)
-
-    def wipe_queue(self):
-        with self.mutex:
-            self.queue = []
-            self.server.queue_updated()
-
-    def delete_queue_item(self, function):
-        with self.mutex:
-            for x in range(len(self.queue)):
-                if function(self.queue[x]):
-                    if len(self.queue) == 1:
-                        self.wipe_queue()
-                    else:
-                        self.queue.pop(x)
-                        heapq.heapify(self.queue)
-                    self.server.queue_updated()
-                    return True
-        return False
-
-    def get_history(self, prompt_id=None, max_items=None, offset=-1):
-        with self.mutex:
-            if prompt_id is None:
-                out = {}
-                i = 0
-                if offset < 0 and max_items is not None:
-                    offset = len(self.history) - max_items
-                for k in self.history:
-                    if i >= offset:
-                        out[k] = self.history[k]
-                        if max_items is not None and len(out) >= max_items:
-                            break
-                    i += 1
-                return out
-            elif prompt_id in self.history:
-                return {prompt_id: copy.deepcopy(self.history[prompt_id])}
-            else:
-                return {}
-
-    def wipe_history(self):
-        with self.mutex:
-            self.history = {}
-
-    def delete_history_item(self, id_to_delete):
-        with self.mutex:
-            self.history.pop(id_to_delete, None)
-
-    def set_flag(self, name, data):
-        with self.mutex:
-            self.flags[name] = data
-            self.not_empty.notify()
-
-    def get_flags(self, reset=True):
-        with self.mutex:
-            if reset:
-                ret = self.flags
-                self.flags = {}
-                return ret
-            else:
-                return self.flags.copy()

@@ -128,9 +128,6 @@ try:
 except:
     mlu_available = False
 
-if args.cpu:
-    cpu_state = CPUState.CPU
-
 def is_intel_xpu():
     global cpu_state
     global xpu_available
@@ -170,6 +167,11 @@ def get_torch_device():
             return torch.device("mlu", torch.mlu.current_device())
         else:
             return torch.device(torch.cuda.current_device())
+
+try:
+    get_torch_device()
+except:
+    cpu_state = CPUState.CPU
 
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
@@ -1248,32 +1250,3 @@ def soft_empty_cache(force=False):
 def unload_all_models():
     free_memory(1e30, get_torch_device())
 
-
-#TODO: might be cleaner to put this somewhere else
-import threading
-
-class InterruptProcessingException(Exception):
-    pass
-
-interrupt_processing_mutex = threading.RLock()
-
-interrupt_processing = False
-def interrupt_current_processing(value=True):
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        interrupt_processing = value
-
-def processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        return interrupt_processing
-
-def throw_exception_if_processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        if interrupt_processing:
-            interrupt_processing = False
-            raise InterruptProcessingException()

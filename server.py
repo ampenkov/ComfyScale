@@ -34,8 +34,8 @@ from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
-from comfy_execution.caching import LRUCache
 from message_queue import MessageQueue
+from cache import LRUCache
 from execution import execute_prompt
 
 class BinaryEventTypes:
@@ -51,7 +51,7 @@ async def send_socket_catch_exception(function, message):
 @web.middleware
 async def cache_control(request: web.Request, handler):
     response: web.Response = await handler(request)
-    if request.path.endswith('.js') or request.path.endswith('.css'):
+    if request.path.endswith('.js') or request.path.endswith('.css') or request.path.endswith('index.json'):
         response.headers.setdefault('Cache-Control', 'no-cache')
     return response
 
@@ -157,13 +157,14 @@ class PromptServer():
         mimetypes.add_type('image/webp', '.webp')
 
         self.cache = LRUCache.remote()
+        self.messages = MessageQueue.remote()
+
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
         self.custom_node_manager = CustomNodeManager()
         self.internal_routes = InternalRoutes(self)
         self.supports = ["custom_nodes_from_web"]
         self.loop = loop
-        self.messages = MessageQueue.remote()
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
@@ -631,7 +632,13 @@ class PromptServer():
                     logging.warning("invalid prompt: {}".format(valid[1]))
                     return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
             else:
-                return web.json_response({"error": "no prompt", "node_errors": []}, status=400)
+                error = {
+                     "type": "no_prompt",
+                     "message": "No prompt provided",
+                     "details": "No prompt provided",
+                     "extra_info": {}
+                 }
+                return web.json_response({"error": error, "node_errors": {}}, status=400)
 
     async def setup(self):
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
@@ -660,6 +667,12 @@ class PromptServer():
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
             self.app.add_routes([web.static('/extensions/' + name, dir)])
+
+        workflow_templates_path = FrontendManager.templates_path()
+        if workflow_templates_path:
+             self.app.add_routes([
+                 web.static('/templates', workflow_templates_path)
+             ])
 
         self.app.add_routes([
             web.static('/', self.web_root),

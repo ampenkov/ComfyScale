@@ -57,4 +57,4 @@ class TerminalService:
                 self.unsubscribe(client_id)
                 continue
 
-            self.server.send_sync("logs", {"entries": entries, "size": new_size}, client_id)
+            self.server.messages.add.remote("logs", {"entries": entries, "size": new_size}, client_id)

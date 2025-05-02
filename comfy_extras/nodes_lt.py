@@ -2,6 +2,7 @@ import io
 import nodes
 import node_helpers
 import torch
+import ray
 import comfy.model_management
 import comfy.model_sampling
 import comfy.utils
@@ -46,22 +47,24 @@ class LTXVImgToVideo:
     CATEGORY = "conditioning/video_models"
     FUNCTION = "generate"
 
-    def generate(self, positive, negative, image, vae, width, height, length, batch_size):
-        pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-        encode_pixels = pixels[:, :, :, :3]
-        t = vae.encode(encode_pixels)
+    @ray.remote(num_returns=3)
+    def generate(self, positive, negative, image, vae, width, height, length, batch_size, **kwargs):
+        with torch.inference_mode():
+            pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+            encode_pixels = pixels[:, :, :, :3]
+            t = vae.encode(encode_pixels)
 
-        latent = torch.zeros([batch_size, 128, ((length - 1) // 8) + 1, height // 32, width // 32], device=comfy.model_management.intermediate_device())
-        latent[:, :, :t.shape[2]] = t
+            latent = torch.zeros([batch_size, 128, ((length - 1) // 8) + 1, height // 32, width // 32], device=comfy.model_management.intermediate_device())
+            latent[:, :, :t.shape[2]] = t
 
-        conditioning_latent_frames_mask = torch.ones(
-            (batch_size, 1, latent.shape[2], 1, 1),
-            dtype=torch.float32,
-            device=latent.device,
-        )
-        conditioning_latent_frames_mask[:, :, :t.shape[2]] = 0
+            conditioning_latent_frames_mask = torch.ones(
+                (batch_size, 1, latent.shape[2], 1, 1),
+                dtype=torch.float32,
+                device=latent.device,
+            )
+            conditioning_latent_frames_mask[:, :, :t.shape[2]] = 0
 
-        return (positive, negative, {"samples": latent, "noise_mask": conditioning_latent_frames_mask}, )
+            return positive, negative, {"samples": latent, "noise_mask": conditioning_latent_frames_mask}
 
 
 def conditioning_get_any_value(conditioning, key, default=None):
@@ -274,10 +277,11 @@ class LTXVConditioning:
 
     CATEGORY = "conditioning/video_models"
 
-    def append(self, positive, negative, frame_rate):
+    @ray.remote(num_returns=2)
+    def append(self, positive, negative, frame_rate, **kwargs):
         positive = node_helpers.conditioning_set_values(positive, {"frame_rate": frame_rate})
         negative = node_helpers.conditioning_set_values(negative, {"frame_rate": frame_rate})
-        return (positive, negative)
+        return positive, negative
 
 
 class ModelSamplingLTXV:
@@ -349,7 +353,8 @@ class LTXVScheduler:
 
     FUNCTION = "get_sigmas"
 
-    def get_sigmas(self, steps, max_shift, base_shift, stretch, terminal, latent=None):
+    @ray.remote(num_returns=2)
+    def get_sigmas(self, steps, max_shift, base_shift, stretch, terminal, latent=None, **kwargs):
         if latent is None:
             tokens = 4096
         else:
@@ -379,7 +384,7 @@ class LTXVScheduler:
             stretched = 1.0 - (one_minus_z / scale_factor)
             sigmas[non_zero_mask] = stretched
 
-        return (sigmas,)
+        return sigmas, None
 
 def encode_single_frame(output_file, image_array: np.ndarray, crf):
     container = av.open(output_file, "w", format="mp4")
@@ -445,11 +450,12 @@ class LTXVPreprocess:
     RETURN_NAMES = ("output_image",)
     CATEGORY = "image"
 
-    def preprocess(self, image, img_compression):
+    @ray.remote(num_returns=2)
+    def preprocess(self, image, img_compression, **kwargs):
         output_images = []
         for i in range(image.shape[0]):
             output_images.append(preprocess(image[i], img_compression))
-        return (torch.stack(output_images),)
+        return torch.stack(output_images), None
 
 
 NODE_CLASS_MAPPINGS = {

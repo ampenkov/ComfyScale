@@ -2,6 +2,7 @@ import comfy.sd
 import comfy.model_sampling
 import comfy.latent_formats
 import nodes
+import ray
 import torch
 import node_helpers
 
@@ -266,7 +267,8 @@ class RescaleCFG:
 
     CATEGORY = "advanced/model"
 
-    def patch(self, model, multiplier):
+    @ray.remote(num_returns=2)
+    def patch(self, model, multiplier, **kwargs):
         def rescale_cfg(args):
             cond = args["cond"]
             uncond = args["uncond"]
@@ -292,7 +294,7 @@ class RescaleCFG:
 
         m = model.clone()
         m.set_model_sampler_cfg_function(rescale_cfg)
-        return (m, )
+        return m, None
 
 class ModelComputeDtype:
     @classmethod

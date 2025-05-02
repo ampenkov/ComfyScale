@@ -1,8 +1,10 @@
+import torch
+import ray
+
 import comfy.samplers
 import comfy.sample
 from comfy.k_diffusion import sampling as k_diffusion_sampling
 import latent_preview
-import torch
 import comfy.utils
 import node_helpers
 
@@ -261,9 +263,10 @@ class KSamplerSelect:
 
     FUNCTION = "get_sampler"
 
-    def get_sampler(self, sampler_name):
+    @ray.remote(num_returns=2)
+    def get_sampler(self, sampler_name, **kwargs):
         sampler = comfy.samplers.sampler_object(sampler_name)
-        return (sampler, )
+        return sampler, None
 
 class SamplerDPMPP_3M_SDE:
     @classmethod
@@ -471,36 +474,38 @@ class SamplerCustom:
 
     CATEGORY = "sampling/custom_sampling"
 
-    def sample(self, model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image):
-        latent = latent_image
-        latent_image = latent["samples"]
-        latent = latent.copy()
-        latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image)
-        latent["samples"] = latent_image
+    @ray.remote(num_returns=2)
+    def sample(self, model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image, **kwargs):
+        with torch.inference_mode():
+            latent = latent_image
+            latent_image = latent["samples"]
+            latent = latent.copy()
+            latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image)
+            latent["samples"] = latent_image
 
-        if not add_noise:
-            noise = Noise_EmptyNoise().generate_noise(latent)
-        else:
-            noise = Noise_RandomNoise(noise_seed).generate_noise(latent)
+            if not add_noise:
+                noise = Noise_EmptyNoise().generate_noise(latent)
+            else:
+                noise = Noise_RandomNoise(noise_seed).generate_noise(latent)
 
-        noise_mask = None
-        if "noise_mask" in latent:
-            noise_mask = latent["noise_mask"]
+            noise_mask = None
+            if "noise_mask" in latent:
+                noise_mask = latent["noise_mask"]
 
-        x0_output = {}
-        callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1, x0_output)
+            x0_output = {}
+            callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1, x0_output)
 
-        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-        samples = comfy.sample.sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise_seed)
+            disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+            samples = comfy.sample.sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise_seed)
 
-        out = latent.copy()
-        out["samples"] = samples
-        if "x0" in x0_output:
-            out_denoised = latent.copy()
-            out_denoised["samples"] = model.model.process_latent_out(x0_output["x0"].cpu())
-        else:
-            out_denoised = out
-        return (out, out_denoised)
+            out = latent.copy()
+            out["samples"] = samples
+            if "x0" in x0_output:
+                out_denoised = latent.copy()
+                out_denoised["samples"] = model.model.process_latent_out(x0_output["x0"].cpu())
+            else:
+                out_denoised = out
+            return out, out_denoised
 
 class Guider_Basic(comfy.samplers.CFGGuider):
     def set_conds(self, positive):

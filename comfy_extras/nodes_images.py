@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ray
+
 import nodes
 import folder_paths
 from comfy.cli_args import args
@@ -99,7 +101,8 @@ class SaveAnimatedWEBP:
 
     CATEGORY = "image/animation"
 
-    def save_images(self, images, fps, filename_prefix, lossless, quality, method, num_frames=0, prompt=None, extra_pnginfo=None):
+    @ray.remote(num_returns=2)
+    def save_images(self, images, fps, filename_prefix, lossless, quality, method, num_frames=0, prompt=None, extra_pnginfo=None, **kwargs):
         method = self.methods.get(method)
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
@@ -135,7 +138,7 @@ class SaveAnimatedWEBP:
             counter += 1
 
         animated = num_frames != 1
-        return { "ui": { "images": results, "animated": (animated,) } }
+        return { "ui": { "images": results, "animated": (animated,) } }, None
 
 class SaveAnimatedPNG:
     def __init__(self):

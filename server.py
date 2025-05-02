@@ -35,7 +35,7 @@ from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
 from message_queue import MessageQueue
-from cache import LRUCache
+from cache import Cache
 from execution import execute_prompt
 
 class BinaryEventTypes:
@@ -156,7 +156,7 @@ class PromptServer():
         mimetypes.add_type('application/javascript; charset=utf-8', '.js')
         mimetypes.add_type('image/webp', '.webp')
 
-        self.cache = LRUCache.remote()
+        self.cache = Cache.remote()
         self.messages = MessageQueue.remote()
 
         self.user_manager = UserManager()
@@ -622,7 +622,8 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
                 if valid[0]:
-                    client_id = extra_data.get("client_id", None)
+                    client_id = extra_data.get("client_id", "me")
+                    client_id = "me"
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
                     execute_prompt.remote(self.messages, self.cache, client_id, prompt_id, prompt, extra_data, outputs_to_execute)

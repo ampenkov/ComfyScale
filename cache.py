@@ -1,29 +1,41 @@
 import ray
-from collections import OrderedDict
+
+from collections import defaultdict
 
 from comfy_execution.caching import get_node_signature
 
+
 @ray.remote
-class LRUCache:
-    def __init__(self, max_size=100):
-        self.max_size = max_size
-        self.cache = OrderedDict()
+class Cache:
+    def __init__(self):
+        self.cache = {}
+        self.ref_counts = defaultdict(int)
 
     def get(self, prompt):
-        result = {}
+        outputs = {}
         for node_id in prompt.keys():
             sig = get_node_signature(prompt, node_id)
             obj = self.cache.get(sig)
             if obj is not None:
-                self.cache.move_to_end(sig)
-            result[node_id] = obj
-        return result
+                outputs[node_id] = obj
+                self.ref_counts[sig] += 1
+
+        return outputs
 
     def set(self, outputs, prompt) -> None:
         for node_id, obj_ref in outputs.items():
             sig = get_node_signature(prompt, node_id)
-            if sig in self.cache:
-                self.cache.move_to_end(sig)
-            self.cache[sig] = obj_ref
-            if len(self.cache) > self.max_size:
-                self.cache.popitem(last=False)
+            if sig not in self.cache:
+                self.cache[sig] = obj_ref
+                self.ref_counts[sig] = 1
+            else:
+                self.ref_counts[sig] += 1
+
+    def set_unused(self, prompt):
+        for node_id in prompt.keys():
+            sig = get_node_signature(prompt, node_id)
+            if sig in self.ref_counts:
+                self.ref_counts[sig] -= 1
+                if self.ref_counts[sig] <= 0:
+                    del self.cache[sig]
+                    del self.ref_counts[sig]

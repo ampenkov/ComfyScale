@@ -138,7 +138,7 @@ import comfy.utils
 import execution
 import server
 from server import BinaryEventTypes
-from metrics import REQUEST_COUNT, REQUEST_LATENCY
+from metrics import REQUEST_COUNT, REQUEST_LATENCY, EXECUTION_LATENCY
 import nodes
 import comfy.model_management
 import comfyui_version
@@ -181,7 +181,7 @@ def prompt_worker(q, server_instance):
             execution_start_time = time.perf_counter()
             prompt_id = item[1]
             workflow = item[3].get("workflow", "unknown")
-            start_time = item[5]
+            request_start_time = item[5]
             server_instance.last_prompt_id = prompt_id
 
             e.execute(item[2], prompt_id, item[3], item[4])
@@ -200,7 +200,8 @@ def prompt_worker(q, server_instance):
             logging.info("Prompt executed in {:.2f} seconds".format(execution_time))
             if e.success:
                 REQUEST_COUNT.labels(workflow=workflow, status="ok").inc()
-                REQUEST_LATENCY.labels(workflow=workflow).observe(time.perf_counter() - start_time)
+                REQUEST_LATENCY.labels(workflow=workflow).observe(time.perf_counter() - request_start_time)
+                EXECUTION_LATENCY.labels(workflow=workflow).observe(execution_time)
             else:
                 REQUEST_COUNT.labels(workflow=workflow, status="fail").inc()
 

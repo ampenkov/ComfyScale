@@ -635,7 +635,7 @@ class PromptServer():
 
         @routes.post("/prompt")
         async def post_prompt(request):
-            start_time = time.perf_counter()
+            request_start_time = time.perf_counter()
             logging.info("got prompt")
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
@@ -663,7 +663,7 @@ class PromptServer():
                 if valid[0]:
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, start_time))
+                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, request_start_time))
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:

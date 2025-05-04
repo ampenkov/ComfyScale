@@ -14,3 +14,10 @@ REQUEST_LATENCY = Histogram(
     ('workflow',),
     buckets=[i for i in range(1, HISTOGRAM_LIMIT, HISTOGRAM_STEP)],
 )
+
+EXECUTION_LATENCY = Histogram(
+    'execution_latency',
+    'execution latency',
+    ('workflow',),
+    buckets=[i for i in range(1, HISTOGRAM_LIMIT, HISTOGRAM_STEP)],
+)

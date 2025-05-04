@@ -3,8 +3,8 @@ name: Build & Publish Docker Image
 on:
   push:
     tags:
-      - 'ComfyUI-*'
-      - 'ComfyScale-*'
+      - 'comfyui-*'
+      - 'comfyscale-*'
 
 env:
   REGISTRY: ghcr.io

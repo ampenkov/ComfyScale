@@ -6,7 +6,7 @@ OBJECT_STORE_FRACTION = float(os.getenv("OBJECT_STORE_FRACTION", 0.3))
 
 # dashboard
 DASHBOARD_HOST = os.getenv("DDASHBOARD_HOST", "0.0.0.0")
-DASHBOARD_PORT = int(os.getenv("METRICS_PORT", 8265))
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", 8265))
 
 # metrics
 METRICS_PORT = int(os.getenv("METRICS_PORT", 8080))

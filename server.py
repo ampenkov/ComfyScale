@@ -1,6 +1,7 @@
 import os
 import sys
 import traceback
+import time
 
 import nodes
 import folder_paths
@@ -34,9 +35,11 @@ from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
-from message_queue import MessageQueue
 from cache import Cache
 from execution import execute_prompt
+from message_queue import MessageQueue
+from metrics import REQUEST_COUNT
+
 
 class BinaryEventTypes:
     PREVIEW_IMAGE = 1
@@ -601,6 +604,7 @@ class PromptServer():
 
         @routes.post("/prompt")
         async def post_prompt(request):
+            request_start_time = time.perf_counter()
             logging.info("got prompt")
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
@@ -622,6 +626,7 @@ class PromptServer():
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
 
+                tags = {"workflow": extra_data.get("workflow", "unknown")}
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
                 if valid[0]:
@@ -629,11 +634,21 @@ class PromptServer():
                     client_id = "me"
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
-                    execute_prompt.remote(client_id, prompt_id, prompt, outputs_to_execute, self.cache, self.messages, extra_data)
+                    execute_prompt.remote(
+                        client_id,
+                        prompt_id,
+                        prompt,
+                        outputs_to_execute,
+                        request_start_time,
+                        self.cache,
+                        self.messages,
+                        extra_data,
+                    )
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
                     logging.warning("invalid prompt: {}".format(valid[1]))
+                    REQUEST_COUNT.inc(1, {**tags, "status": "fail"})
                     return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
             else:
                 error = {
@@ -641,7 +656,8 @@ class PromptServer():
                      "message": "No prompt provided",
                      "details": "No prompt provided",
                      "extra_info": {}
-                 }
+                }
+                REQUEST_COUNT.inc(1, {**tags, "status": "fail"})
                 return web.json_response({"error": error, "node_errors": {}}, status=400)
 
     async def setup(self):

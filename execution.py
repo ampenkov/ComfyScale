@@ -6,28 +6,13 @@ import inspect
 from enum import Enum
 
 import ray
-from ray.util.metrics import Counter, Histogram
 
 import nodes
-from env import HISTOGRAM_LIMIT, HISTOGRAM_STEP
+from metrics import REQUEST_COUNT, REQUEST_LATENCY, EXECUTION_LATENCY
 
 from comfy_execution.graph import get_input_info, StageList, ExecutionBlocker
 from comfy_execution.graph_utils import is_link, GraphBuilder
 from comfy_execution.validation import validate_node_input
-
-
-REQUEST_COUNT = Counter(
-    "request_count",
-    "request count",
-    ("workflow", "status"),
-)
-
-REQUEST_LATENCY = Histogram(
-    'request_latency',
-    'request latency',
-    [i for i in range(1, HISTOGRAM_LIMIT, HISTOGRAM_STEP)],
-    ("workflow",),
-)
 
 class ExecutionResult(Enum):
     STAGED = 0
@@ -288,8 +273,17 @@ def execute_node(
 
 
 @ray.remote(num_cpus=0, resources={"num_parallelism": 1})
-def execute_prompt(client_id, prompt_id, prompt, execute_outputs, cache, messages, extra_data={}):
-    start_time = time.time()
+def execute_prompt(
+    client_id,
+    prompt_id,
+    prompt,
+    execute_outputs,
+    request_start_time,
+    cache,
+    messages,
+    extra_data={},
+):
+    execution_start_time = time.perf_counter()
     tags = {"workflow": extra_data.get("workflow", "unknown")}
 
     def _fail(error={}):
@@ -349,7 +343,8 @@ def execute_prompt(client_id, prompt_id, prompt, execute_outputs, cache, message
     else:
         cache.set_unused.remote(prompt)
         REQUEST_COUNT.inc(1, {**tags, "status": "ok"})
-        REQUEST_LATENCY.observe(time.time() - start_time, {**tags, "status": "ok"})
+        REQUEST_LATENCY.observe(time.perf_counter() - request_start_time, tags)
+        EXECUTION_LATENCY.observe(time.perf_counter() - execution_start_time, tags)
 
 
 def handle_execution_error(messages, client_id, prompt_id, prompt, staged, error):

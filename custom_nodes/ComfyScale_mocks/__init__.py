@@ -20,7 +20,7 @@ class NetworkRequestMocker:
 
     @ray.remote(num_returns=2)
     def mock(self, prompt, image):
-        time.sleep(random.uniform(5, 10))
+        time.sleep(random.normalvariate(15, 5))
         return image, None
 
 

@@ -1,6 +1,5 @@
 import torch
 import ray
-import os
 
 import logging
 from spandrel import ModelLoader, ImageModelDescriptor

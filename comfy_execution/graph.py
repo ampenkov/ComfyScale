@@ -149,10 +149,9 @@ class TopologicalSort:
         return len(self.pendingNodes) == 0
 
 
-class ExecutionList(TopologicalSort):
+class StageList(TopologicalSort):
     """
-    ExecutionList implements a topological dissolve of the graph. After a node is staged for execution,
-    it can still be returned to the graph after having further dependencies added.
+    StageList implements a topological dissolve of the graph.
     """
 
     def __init__(self, prompt):
@@ -223,7 +222,7 @@ class ExecutionList(TopologicalSort):
         assert self.staged_node_id is not None
         self.staged_node_id = None
 
-    def complete_node_execution(self):
+    def complete_node_staging(self):
         node_id = self.staged_node_id
         self.pop_node(node_id)
         self.staged_node_id = None

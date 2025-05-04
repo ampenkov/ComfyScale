@@ -1,20 +1,36 @@
 import sys
 import logging
+import time
 import traceback
-from enum import Enum
 import inspect
+from enum import Enum
 
 import ray
+from ray.util.metrics import Counter, Histogram
 
 import nodes
+from env import HISTOGRAM_LIMIT, HISTOGRAM_STEP
 
-import comfy.model_management
-from comfy_execution.graph import get_input_info, ExecutionList, ExecutionBlocker
+from comfy_execution.graph import get_input_info, StageList, ExecutionBlocker
 from comfy_execution.graph_utils import is_link, GraphBuilder
 from comfy_execution.validation import validate_node_input
 
+
+REQUEST_COUNT = Counter(
+    "request_count",
+    "request count",
+    ("workflow", "status"),
+)
+
+REQUEST_LATENCY = Histogram(
+    'request_latency',
+    'request latency',
+    [i for i in range(1, HISTOGRAM_LIMIT, HISTOGRAM_STEP)],
+    ("workflow",),
+)
+
 class ExecutionResult(Enum):
-    SUCCESS = 0
+    STAGED = 0
     FAILURE = 1
 
 class DuplicateNodeError(Exception):
@@ -93,7 +109,13 @@ def get_input_data(inputs, class_def, unique_id, outputs=None, prompt=None, extr
 
 map_node_over_list = None #Don't hook this please
 
-def _map_node_over_list(obj, input_data_all, func, execution_block_cb=None, pre_execute_cb=None):
+def _map_node_over_list(
+    obj,
+    input_data_all,
+    func,
+    execution_block_cb=None,
+    pre_execute_cb=None,
+):
     # check if node wants the lists
     input_is_list = getattr(obj, "INPUT_IS_LIST", False)
 
@@ -125,7 +147,8 @@ def _map_node_over_list(obj, input_data_all, func, execution_block_cb=None, pre_
             if func in {"IS_CHANGED", "VALIDATE_INPUTS"}:
                 results.append(getattr(obj, func)(**inputs))
             else:
-                results.append(getattr(obj, func).remote(**dict(inputs, self=obj)))
+                extra = {"self": obj}
+                results.append(getattr(obj, func).remote(**inputs, **extra))
         else:
             results.append(execution_block)
 
@@ -162,7 +185,13 @@ def merge_result_data(results, obj):
 
 def get_output_data(obj, input_data_all, execution_block_cb=None, pre_execute_cb=None):
     results = []
-    return_values = _map_node_over_list(obj, input_data_all, obj.FUNCTION, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
+    return_values = _map_node_over_list(
+        obj,
+        input_data_all,
+        obj.FUNCTION,
+        execution_block_cb=execution_block_cb,
+        pre_execute_cb=pre_execute_cb,
+    )
 
     for i in range(len(return_values)):
         r = return_values[i]
@@ -185,51 +214,55 @@ def format_value(x):
     else:
         return str(x)
 
-def execute_node(outputs, messages, client_id, prompt, current_item, extra_data, executed, prompt_id):
-    unique_id = current_item
-    inputs = prompt[unique_id]['inputs']
-    class_type = prompt[unique_id]['class_type']
-    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    if outputs.get(unique_id) is not None:
-        if client_id is not None:
-            messages.add.remote("node_cached", { "node": unique_id, "prompt_id": prompt_id }, client_id)
-        return (ExecutionResult.SUCCESS, None, None)
+def execute_node(
+    outputs,
+    messages,
+    client_id,
+    prompt,
+    unique_node_id,
+    extra_data,
+    staged,
+    prompt_id,
+):
+    class_type = prompt[unique_node_id]["class_type"]
+    meta = {
+        "client_id": client_id,
+        "prompt_id": prompt_id,
+        "node_id": unique_node_id,
+        "class_type": class_type,
+    }
 
+    if outputs.get(unique_node_id) is not None:
+        if client_id is not None:
+            messages.add.remote("node_cached", meta, client_id)
+        return (ExecutionResult.STAGED, None, None)
+
+    inputs = prompt[unique_node_id]["inputs"]
     input_data_all = None
+    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+
     try:
-        input_data_all, _ = get_input_data(inputs, class_def, unique_id, outputs, prompt, extra_data)
+        input_data_all, _ = get_input_data(inputs, class_def, unique_node_id, outputs, prompt, extra_data)
         obj = class_def()
 
         def execution_block_cb(block):
             if block.message is not None:
-                mes = {
-                    "prompt_id": prompt_id,
-                    "node_id": unique_id,
-                    "node_type": class_type,
-                    "executed": list(executed),
-
-                    "exception_message": f"Execution Blocked: {block.message}",
-                    "exception_type": "ExecutionBlocked",
-                    "traceback": [],
-                    "current_inputs": [],
-                    "current_outputs": [],
-                }
-                messages.add.remote("execution_failed", mes, client_id)
+                messages.add.remote("execution_failed", meta, client_id)
                 return ExecutionBlocker(None)
             else:
                 return block
+
         def pre_execute_cb(call_index):
-            GraphBuilder.set_default_prefix(unique_id, call_index, 0)
-        output_data = get_output_data(obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb)
+            GraphBuilder.set_default_prefix(unique_node_id, call_index, 0)
 
-        if client_id is not None:
-            messages.add.remote("node_staged", { "node": unique_id, "prompt_id": prompt_id }, client_id)
+        output_data = get_output_data(
+            obj,
+            input_data_all,
+            execution_block_cb=execution_block_cb,
+            pre_execute_cb=pre_execute_cb,
+        )
 
-        outputs[unique_id] = output_data
-    except comfy.model_management.InterruptProcessingException as iex:
-        logging.info("Processing interrupted")
-        error_details = {"node_id": unique_id}
-        return (ExecutionResult.FAILURE, error_details, iex)
+        outputs[unique_node_id] = output_data
     except Exception as ex:
         typ, _, tb = sys.exc_info()
         exception_type = full_type_name(typ)
@@ -239,87 +272,94 @@ def execute_node(outputs, messages, client_id, prompt, current_item, extra_data,
             for name, inputs in input_data_all.items():
                 input_data_formatted[name] = [format_value(x) for x in inputs]
 
-        logging.error(f"!!! Exception during processing !!! {ex}")
-        logging.error(traceback.format_exc())
-
         error_details = {
-            "node_id": unique_id,
+            "node_id": unique_node_id,
             "exception_message": str(ex),
             "exception_type": exception_type,
             "traceback": traceback.format_tb(tb),
-            "current_inputs": input_data_formatted
+            "current_inputs": input_data_formatted,
         }
-        if isinstance(ex, comfy.model_management.OOM_EXCEPTION):
-            logging.error("Got an OOM, unloading all loaded models.")
-            comfy.model_management.unload_all_models()
 
         return (ExecutionResult.FAILURE, error_details, ex)
 
-    executed.add(unique_id)
+    staged.add(unique_node_id)
 
-    return (ExecutionResult.SUCCESS, None, None)
+    return (ExecutionResult.STAGED, None, None)
 
-@ray.remote
-def execute_prompt(messages, cache, client_id, prompt_id, prompt, extra_data={}, execute_outputs=[]):
-    messages.add.remote("execution_started", { "prompt_id": prompt_id}, client_id, broadcast=False)
 
-    outputs = {}
+@ray.remote(num_cpus=0, resources={"num_parallelism": 1})
+def execute_prompt(client_id, prompt_id, prompt, execute_outputs, cache, messages, extra_data={}):
+    start_time = time.time()
+    tags = {"workflow": extra_data.get("workflow", "unknown")}
 
-    cached_nodes = ray.get(cache.get.remote(prompt))
-    for node_id, node in cached_nodes.items():
-        if node is not None:
-            outputs[node_id] = node
+    def _fail(error={}):
+        cache.set_unused.remote(prompt)
+        handle_execution_error(messages, client_id, prompt_id, prompt, staged, error)
+        REQUEST_COUNT.inc(1, {**tags, "status": "fail"})
 
-    comfy.model_management.cleanup_models_gc()
-    messages.add.remote("execution_cached", {"nodes": list(outputs.keys()), "prompt_id": prompt_id}, client_id, broadcast=False)
+    try:
+        outputs = ray.get(cache.get.remote(prompt))
+        messages.add.remote(
+            "execution_cached",
+            {"nodes": list(outputs.keys()), "prompt_id": prompt_id},
+            client_id,
+            broadcast=False
+        )
 
-    executed = set()
-    execution_list = ExecutionList(prompt)
+        staged = set()
+        stage_list = StageList(prompt)
+        for node_id in execute_outputs:
+            stage_list.add_node(node_id)
 
-    for node_id in list(execute_outputs):
-        execution_list.add_node(node_id)
+        while not stage_list.is_empty():
+            node_id, error, exc = stage_list.stage_node_execution()
+            if error:
+                raise RuntimeError((error, exc))
 
-    while not execution_list.is_empty():
-        node_id, error, ex = execution_list.stage_node_execution()
-        if error is not None:
-            handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex)
-            break
+            result, error, exc = execute_node(
+                outputs,
+                messages,
+                client_id,
+                prompt,
+                node_id,
+                extra_data,
+                staged,
+                prompt_id,
+            )
+            if result != ExecutionResult.STAGED:
+                raise RuntimeError((error, exc))
 
-        result, error, ex = execute_node(outputs, messages, client_id, prompt, node_id, extra_data, executed, prompt_id)
-        if result == ExecutionResult.FAILURE:
-            handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex)
-            break
-        else: # result == ExecutionResult.SUCCESS:
-            execution_list.complete_node_execution()
-    else:
+            stage_list.complete_node_staging()
+
         cache.set.remote(outputs, prompt)
-        messages.add.remote("execution_staged", { "prompt_id": prompt_id }, client_id, broadcast=False)
 
+        for obj_list in outputs.values():
+            for ref in obj_list:
+                ray.get(ref)
 
-def handle_execution_error(messages, client_id, prompt_id, prompt, executed, error, ex):
-    node_id = error["node_id"]
-    class_type = prompt[node_id]["class_type"]
+    except RuntimeError as re:
+        err, _ = re.args[0]
+        _fail(err)
+        return
 
-    if isinstance(ex, comfy.model_management.InterruptProcessingException):
-        mes = {
-            "prompt_id": prompt_id,
-            "node_id": node_id,
-            "node_type": class_type,
-            "executed": list(executed),
-        }
-        messages.add.remote("execution_interrupted", mes, client_id, broadcast=True)
+    except Exception as _:
+        _fail()
+        return
+
     else:
-        mes = {
+        cache.set_unused.remote(prompt)
+        REQUEST_COUNT.inc(1, {**tags, "status": "ok"})
+        REQUEST_LATENCY.observe(time.time() - start_time, {**tags, "status": "ok"})
+
+
+def handle_execution_error(messages, client_id, prompt_id, prompt, staged, error):
+    mes = {
             "prompt_id": prompt_id,
-            "node_id": node_id,
-            "node_type": class_type,
-            "executed": list(executed),
-            "exception_message": error["exception_message"],
-            "exception_type": error["exception_type"],
-            "traceback": error["traceback"],
-            "current_inputs": error["current_inputs"],
-        }
-        messages.add.remote("execution_failed", mes, client_id, broadcast=False)
+            "prompt": prompt,
+            "staged": list(staged),
+            **error,
+    }
+    messages.add.remote("execution_failed", mes, client_id, broadcast=False)
 
 def validate_inputs(prompt, item, validated):
     unique_id = item

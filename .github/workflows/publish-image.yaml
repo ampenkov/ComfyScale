@@ -3,12 +3,12 @@ name: Build & Publish Docker Image
 on:
   push:
     tags:
-      - 'ComfyUI-*'
-      - 'ComfyScale-*'
+      - 'comfyui-*'
+      - 'comfyscale-*'
 
 env:
   REGISTRY: ghcr.io
-  REPO: ${{ github.event.repository.name }}
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   build-and-push:
@@ -49,4 +49,4 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.REPO }}/${{ steps.branch.outputs.branch }}:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ steps.branch.outputs.branch }}:${{ steps.tag.outputs.tag }}

@@ -626,7 +626,7 @@ class PromptServer():
                     client_id = "me"
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
-                    execute_prompt.remote(self.messages, self.cache, client_id, prompt_id, prompt, extra_data, outputs_to_execute)
+                    execute_prompt.remote(client_id, prompt_id, prompt, outputs_to_execute, self.cache, self.messages, extra_data)
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:

@@ -17,7 +17,7 @@ from comfy.cli_args import args
 import utils.extra_config
 
 if __name__ == "__main__":
-    #NOTE: These do not do anything on core ComfyUI which should already have no communication with the internet, they are for custom nodes.
+    #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
@@ -140,7 +140,7 @@ import nodes
 import comfy.model_management
 import comfyui_version
 import app.logger
-
+import hook_breaker_ac10a0
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
@@ -193,7 +193,9 @@ def start_comfyui(asyncio_loop=None):
 
     prompt_server = server.PromptServer(asyncio_loop)
 
+    hook_breaker_ac10a0.save_functions()
     nodes.init_extra_nodes(init_custom_nodes=not args.disable_all_custom_nodes)
+    hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
 

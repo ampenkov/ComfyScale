@@ -48,7 +48,7 @@ class LTXVImgToVideo:
     FUNCTION = "generate"
 
     @ray.remote(num_returns=3)
-    def generate(self, positive, negative, image, vae, width, height, length, batch_size, **kwargs):
+    def generate(self, positive, negative, image, vae, width, height, length, batch_size):
         with torch.inference_mode():
             pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
             encode_pixels = pixels[:, :, :, :3]
@@ -278,7 +278,7 @@ class LTXVConditioning:
     CATEGORY = "conditioning/video_models"
 
     @ray.remote(num_returns=2)
-    def append(self, positive, negative, frame_rate, **kwargs):
+    def append(self, positive, negative, frame_rate):
         positive = node_helpers.conditioning_set_values(positive, {"frame_rate": frame_rate})
         negative = node_helpers.conditioning_set_values(negative, {"frame_rate": frame_rate})
         return positive, negative
@@ -354,7 +354,7 @@ class LTXVScheduler:
     FUNCTION = "get_sigmas"
 
     @ray.remote(num_returns=2)
-    def get_sigmas(self, steps, max_shift, base_shift, stretch, terminal, latent=None, **kwargs):
+    def get_sigmas(self, steps, max_shift, base_shift, stretch, terminal, latent=None):
         if latent is None:
             tokens = 4096
         else:
@@ -451,7 +451,7 @@ class LTXVPreprocess:
     CATEGORY = "image"
 
     @ray.remote(num_returns=2)
-    def preprocess(self, image, img_compression, **kwargs):
+    def preprocess(self, image, img_compression):
         output_images = []
         for i in range(image.shape[0]):
             output_images.append(preprocess(image[i], img_compression))

@@ -27,7 +27,7 @@ class UpscaleModelLoader:
     CATEGORY = "loaders"
 
     @ray.remote(num_returns=2)
-    def load_model(self, model_name, **kwargs):
+    def load_model(self, model_name):
         model_path = folder_paths.get_full_path_or_raise("upscale_models", model_name)
         sd = comfy.utils.load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
@@ -52,7 +52,7 @@ class ImageUpscaleWithModel:
     CATEGORY = "image/upscaling"
 
     @ray.remote(num_returns=2)
-    def upscale(self, upscale_model, image, **kwargs):
+    def upscale(self, upscale_model, image):
         with torch.inference_mode():
             device = model_management.get_torch_device()
 

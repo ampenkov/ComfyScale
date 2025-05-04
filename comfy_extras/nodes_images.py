@@ -102,7 +102,7 @@ class SaveAnimatedWEBP:
     CATEGORY = "image/animation"
 
     @ray.remote(num_returns=2)
-    def save_images(self, images, fps, filename_prefix, lossless, quality, method, num_frames=0, prompt=None, extra_pnginfo=None, **kwargs):
+    def save_images(self, images, fps, filename_prefix, lossless, quality, method, num_frames=0, prompt=None, extra_pnginfo=None):
         method = self.methods.get(method)
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])

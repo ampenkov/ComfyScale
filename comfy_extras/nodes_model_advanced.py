@@ -268,7 +268,7 @@ class RescaleCFG:
     CATEGORY = "advanced/model"
 
     @ray.remote(num_returns=2)
-    def patch(self, model, multiplier, **kwargs):
+    def patch(self, model, multiplier):
         def rescale_cfg(args):
             cond = args["cond"]
             uncond = args["uncond"]

@@ -264,7 +264,7 @@ class KSamplerSelect:
     FUNCTION = "get_sampler"
 
     @ray.remote(num_returns=2)
-    def get_sampler(self, sampler_name, **kwargs):
+    def get_sampler(self, sampler_name):
         sampler = comfy.samplers.sampler_object(sampler_name)
         return sampler, None
 
@@ -475,7 +475,7 @@ class SamplerCustom:
     CATEGORY = "sampling/custom_sampling"
 
     @ray.remote(num_returns=2)
-    def sample(self, model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image, **kwargs):
+    def sample(self, model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image):
         with torch.inference_mode():
             latent = latent_image
             latent_image = latent["samples"]

@@ -17,6 +17,7 @@ Pillow
 scipy
 tqdm
 psutil
+prometheus-client
 
 #non essential dependencies:
 kornia>=0.7.1

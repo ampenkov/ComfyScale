@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import time
 import traceback
 
 import nodes
@@ -21,8 +22,10 @@ from io import BytesIO
 import aiohttp
 from aiohttp import web
 import logging
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 import mimetypes
+from metrics import REQUEST_COUNT
 from comfy.cli_args import args
 import comfy.utils
 import comfy.model_management
@@ -34,6 +37,7 @@ from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
+
 
 class BinaryEventTypes:
     PREVIEW_IMAGE = 1
@@ -625,8 +629,13 @@ class PromptServer():
             queue_info['queue_pending'] = current_queue[1]
             return web.json_response(queue_info)
 
+        @routes.get('/metrics')
+        async def metrics(request):
+            return web.Response(body=generate_latest(), headers={'Content-Type': CONTENT_TYPE_LATEST})
+
         @routes.post("/prompt")
         async def post_prompt(request):
+            start_time = time.perf_counter()
             logging.info("got prompt")
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
@@ -648,16 +657,18 @@ class PromptServer():
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
 
+                workflow = extra_data.get("workflow", "unknown")
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
                 if valid[0]:
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute))
+                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, start_time))
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
                     logging.warning("invalid prompt: {}".format(valid[1]))
+                    REQUEST_COUNT.labels(workflow=workflow, status="fail").inc()
                     return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
             else:
                 error = {
@@ -666,6 +677,7 @@ class PromptServer():
                     "details": "No prompt provided",
                     "extra_info": {}
                 }
+                REQUEST_COUNT.labels(workflow="unknown", status="fail").inc()
                 return web.json_response({"error": error, "node_errors": {}}, status=400)
 
         @routes.post("/queue")

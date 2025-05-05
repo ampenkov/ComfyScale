@@ -630,8 +630,7 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
                 if valid[0]:
-                    client_id = extra_data.get("client_id", "me")
-                    client_id = "me"
+                    client_id = extra_data.get("client_id")
                     prompt_id = str(uuid.uuid4())
                     outputs_to_execute = valid[2]
                     execute_prompt.remote(

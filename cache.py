@@ -28,8 +28,6 @@ class Cache:
             if sig not in self.cache:
                 self.cache[sig] = obj_ref
                 self.ref_counts[sig] = 1
-            else:
-                self.ref_counts[sig] += 1
 
     def set_unused(self, prompt):
         for node_id in prompt.keys():

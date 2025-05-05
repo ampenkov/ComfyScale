@@ -122,7 +122,7 @@ class AIO_Preprocessor:
                     if input_type[0] in default_values:
                         params[name] = default_values[input_type[0]]
 
-            return (getattr(aux_class(), aux_class.FUNCTION)(**params),)
+            return getattr(aux_class(), aux_class.FUNCTION)(**params)
 
 class ControlNetAuxSimpleAddText:
     @classmethod

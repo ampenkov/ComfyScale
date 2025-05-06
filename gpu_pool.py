@@ -27,7 +27,7 @@ GPU_MODEL_IO_TYPES = {
 }
 
 
-@ray.remote
+@ray.remote(num_gpus=1)
 class GPUWorker:
     def __init__(self):
         self._models = {}

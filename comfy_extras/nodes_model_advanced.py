@@ -264,10 +264,10 @@ class RescaleCFG:
                               }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
+    IS_GPU = True
 
     CATEGORY = "advanced/model"
 
-    @ray.remote(num_returns=2)
     def patch(self, model, multiplier):
         def rescale_cfg(args):
             cond = args["cond"]

@@ -15,15 +15,14 @@ class Canny_Edge_Preprocessor:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
+    IS_GPU = True
 
     CATEGORY = "ControlNet Preprocessors/Line Extractors"
 
-    @ray.remote(num_returns=2)
     def execute(self, image, low_threshold=100, high_threshold=200, resolution=512):
         from custom_controlnet_aux.canny import CannyDetector
 
-        with torch.inference_mode():
-            return common_annotator_call(CannyDetector(), image, low_threshold=low_threshold, high_threshold=high_threshold, resolution=resolution), None
+        return common_annotator_call(CannyDetector(), image, low_threshold=low_threshold, high_threshold=high_threshold, resolution=resolution), None
 
 
 

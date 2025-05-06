@@ -35,6 +35,7 @@ from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
+from gpu_pool import GPUPool
 from cache import Cache
 from execution import execute_prompt
 from message_queue import MessageQueue
@@ -159,6 +160,7 @@ class PromptServer():
         mimetypes.add_type('application/javascript; charset=utf-8', '.js')
         mimetypes.add_type('image/webp', '.webp')
 
+        self.gpu_pool = GPUPool()
         self.cache = Cache.remote()
         self.messages = MessageQueue.remote()
 
@@ -626,9 +628,11 @@ class PromptServer():
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
 
-                tags = {"workflow": extra_data.get("workflow", "unknown")}
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
+
+                extra_data["request_start_time"] = request_start_time
+                tags = {"workflow": extra_data.get("workflow", "unknown")}
                 if valid[0]:
                     client_id = extra_data.get("client_id")
                     prompt_id = str(uuid.uuid4())
@@ -638,7 +642,7 @@ class PromptServer():
                         prompt_id,
                         prompt,
                         outputs_to_execute,
-                        request_start_time,
+                        self.gpu_pool,
                         self.cache,
                         self.messages,
                         extra_data,

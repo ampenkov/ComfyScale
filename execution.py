@@ -98,6 +98,7 @@ def _map_node_over_list(
     obj,
     input_data_all,
     func,
+    gpu_pool=None,
     execution_block_cb=None,
     pre_execute_cb=None,
 ):
@@ -132,8 +133,10 @@ def _map_node_over_list(
             if func in {"IS_CHANGED", "VALIDATE_INPUTS"}:
                 results.append(getattr(obj, func)(**inputs))
             else:
-                extra = {"self": obj}
-                results.append(getattr(obj, func).remote(**inputs, **extra))
+                if gpu_pool is not None and gpu_pool.should_execute(obj):
+                    results.append(gpu_pool.execute(obj, func, inputs))
+                else:
+                    results.append(getattr(obj, func).remote(**{"self": obj, **inputs}))
         else:
             results.append(execution_block)
 
@@ -168,12 +171,13 @@ def merge_result_data(results, obj):
             output.append([o[i] for o in results])
     return output
 
-def get_output_data(obj, input_data_all, execution_block_cb=None, pre_execute_cb=None):
+def get_output_data(obj, input_data_all, gpu_pool=None, execution_block_cb=None, pre_execute_cb=None):
     results = []
     return_values = _map_node_over_list(
         obj,
         input_data_all,
         obj.FUNCTION,
+        gpu_pool=gpu_pool,
         execution_block_cb=execution_block_cb,
         pre_execute_cb=pre_execute_cb,
     )
@@ -200,34 +204,35 @@ def format_value(x):
         return str(x)
 
 def execute_node(
-    outputs,
-    messages,
     client_id,
-    prompt,
-    unique_node_id,
-    extra_data,
-    staged,
     prompt_id,
+    node_id,
+    prompt,
+    outputs,
+    staged,
+    gpu_pool,
+    messages,
+    extra_data,
 ):
-    class_type = prompt[unique_node_id]["class_type"]
+    class_type = prompt[node_id]["class_type"]
     meta = {
         "client_id": client_id,
         "prompt_id": prompt_id,
-        "node_id": unique_node_id,
+        "node_id": node_id,
         "class_type": class_type,
     }
 
-    if outputs.get(unique_node_id) is not None:
+    if outputs.get(node_id) is not None:
         if client_id is not None:
             messages.add.remote("node_cached", meta, client_id)
         return (ExecutionResult.STAGED, None, None)
 
-    inputs = prompt[unique_node_id]["inputs"]
+    inputs = prompt[node_id]["inputs"]
     input_data_all = None
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
 
     try:
-        input_data_all, _ = get_input_data(inputs, class_def, unique_node_id, outputs, prompt, extra_data)
+        input_data_all, _ = get_input_data(inputs, class_def, node_id, outputs, prompt, extra_data)
         obj = class_def()
 
         def execution_block_cb(block):
@@ -238,16 +243,17 @@ def execute_node(
                 return block
 
         def pre_execute_cb(call_index):
-            GraphBuilder.set_default_prefix(unique_node_id, call_index, 0)
+            GraphBuilder.set_default_prefix(node_id, call_index, 0)
 
         output_data = get_output_data(
             obj,
             input_data_all,
+            gpu_pool,
             execution_block_cb=execution_block_cb,
             pre_execute_cb=pre_execute_cb,
         )
 
-        outputs[unique_node_id] = output_data
+        outputs[node_id] = output_data
     except Exception as ex:
         typ, _, tb = sys.exc_info()
         exception_type = full_type_name(typ)
@@ -258,7 +264,7 @@ def execute_node(
                 input_data_formatted[name] = [format_value(x) for x in inputs]
 
         error_details = {
-            "node_id": unique_node_id,
+            "node_id": node_id,
             "exception_message": str(ex),
             "exception_type": exception_type,
             "traceback": traceback.format_tb(tb),
@@ -267,7 +273,7 @@ def execute_node(
 
         return (ExecutionResult.FAILURE, error_details, ex)
 
-    staged.add(unique_node_id)
+    staged.add(node_id)
 
     return (ExecutionResult.STAGED, None, None)
 
@@ -278,7 +284,7 @@ def execute_prompt(
     prompt_id,
     prompt,
     execute_outputs,
-    request_start_time,
+    gpu_pool,
     cache,
     messages,
     extra_data={},
@@ -311,14 +317,15 @@ def execute_prompt(
                 raise RuntimeError((error, exc))
 
             result, error, exc = execute_node(
-                outputs,
-                messages,
                 client_id,
-                prompt,
-                node_id,
-                extra_data,
-                staged,
                 prompt_id,
+                node_id,
+                prompt,
+                outputs,
+                staged,
+                gpu_pool,
+                messages,
+                extra_data,
             )
             if result != ExecutionResult.STAGED:
                 raise RuntimeError((error, exc))
@@ -343,7 +350,7 @@ def execute_prompt(
     else:
         cache.set_unused.remote(prompt)
         REQUEST_COUNT.inc(1, {**tags, "status": "ok"})
-        REQUEST_LATENCY.observe(time.perf_counter() - request_start_time, tags)
+        REQUEST_LATENCY.observe(time.perf_counter() - extra_data.get("request_start_time", time.perf_counter()), tags)
         EXECUTION_LATENCY.observe(time.perf_counter() - execution_start_time, tags)
 
 

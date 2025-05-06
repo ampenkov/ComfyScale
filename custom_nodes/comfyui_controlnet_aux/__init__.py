@@ -87,10 +87,10 @@ class AIO_Preprocessor:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
+    IS_GPU = True
 
     CATEGORY = "ControlNet Preprocessors"
 
-    @ray.remote(num_returns=2)
     def execute(self, preprocessor, image, resolution=512):
         if preprocessor == "none":
             return image, None
@@ -124,7 +124,7 @@ class AIO_Preprocessor:
                     if input_type[0] in default_values:
                         params[name] = default_values[input_type[0]]
 
-            return getattr(aux_class(), aux_class.FUNCTION)(**params)
+            return getattr(aux_class(), aux_class.FUNCTION)(**params)[0], None
 
 class ControlNetAuxSimpleAddText:
     @classmethod

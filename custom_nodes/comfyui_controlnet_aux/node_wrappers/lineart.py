@@ -14,18 +14,17 @@ class LineArt_Preprocessor:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
+    IS_GPU = True
 
     CATEGORY = "ControlNet Preprocessors/Line Extractors"
 
-    @ray.remote(num_returns=2)
     def execute(self, image, resolution=512, **kwargs):
         from custom_controlnet_aux.lineart import LineartDetector
 
-        with torch.inference_mode():
-            model = LineartDetector.from_pretrained().to(model_management.get_torch_device())
-            out = common_annotator_call(model, image, resolution=resolution, coarse = kwargs["coarse"] == "enable")
-            del model
-            return out, None
+        model = LineartDetector.from_pretrained().to(model_management.get_torch_device())
+        out = common_annotator_call(model, image, resolution=resolution, coarse = kwargs["coarse"] == "enable")
+        del model
+        return out, None
 
 NODE_CLASS_MAPPINGS = {
     "LineArtPreprocessor": LineArt_Preprocessor

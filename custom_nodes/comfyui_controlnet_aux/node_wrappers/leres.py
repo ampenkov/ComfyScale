@@ -16,18 +16,17 @@ class LERES_Depth_Map_Preprocessor:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
+    IS_GPU = True
 
     CATEGORY = "ControlNet Preprocessors/Normal and Depth Estimators"
 
-    @ray.remote(num_returns=2)
     def execute(self, image, rm_nearest=0, rm_background=0, resolution=512, boost="disable"):
         from custom_controlnet_aux.leres import LeresDetector
 
-        with torch.inference_mode():
-            model = LeresDetector.from_pretrained().to(model_management.get_torch_device())
-            out = common_annotator_call(model, image, resolution=resolution, thr_a=rm_nearest, thr_b=rm_background, boost=boost == "enable")
-            del model
-            return out, None
+        model = LeresDetector.from_pretrained().to(model_management.get_torch_device())
+        out = common_annotator_call(model, image, resolution=resolution, thr_a=rm_nearest, thr_b=rm_background, boost=boost == "enable")
+        del model
+        return out, None
     
 NODE_CLASS_MAPPINGS = {
     "LeReS-DepthMapPreprocessor": LERES_Depth_Map_Preprocessor

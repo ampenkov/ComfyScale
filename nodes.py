@@ -54,18 +54,17 @@ class CLIPTextEncode(ComfyNodeABC):
     RETURN_TYPES = (IO.CONDITIONING,)
     OUTPUT_TOOLTIPS = ("A conditioning containing the embedded text used to guide the diffusion model.",)
     FUNCTION = "encode"
+    IS_GPU = True
 
     CATEGORY = "conditioning"
     DESCRIPTION = "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images."
 
-    @ray.remote(num_returns=2)
     def encode(self, clip, text):
         if clip is None:
             raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
 
-        with torch.inference_mode():
-            tokens = clip.tokenize(text)
-            return clip.encode_from_tokens_scheduled(tokens), None
+        tokens = clip.tokenize(text)
+        return clip.encode_from_tokens_scheduled(tokens), None
 
 
 class ConditioningCombine:
@@ -81,7 +80,7 @@ class ConditioningCombine:
     def combine(self, conditioning_1, conditioning_2):
         return conditioning_1 + conditioning_2, None
 
-class ConditioningAverage :
+class ConditioningAverage:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"conditioning_to": ("CONDITIONING", ), "conditioning_from": ("CONDITIONING", ),
@@ -287,17 +286,16 @@ class VAEDecode:
     RETURN_TYPES = ("IMAGE",)
     OUTPUT_TOOLTIPS = ("The decoded image.",)
     FUNCTION = "decode"
+    IS_GPU = True
 
     CATEGORY = "latent"
     DESCRIPTION = "Decodes latent images back into pixel space images."
 
-    @ray.remote(num_returns=2)
     def decode(self, vae, samples):
-        with torch.inference_mode():
-            images = vae.decode(samples["samples"])
-            if len(images.shape) == 5: #Combine batches
-                images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
-            return images, None
+        images = vae.decode(samples["samples"])
+        if len(images.shape) == 5: #Combine batches
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return images, None
 
 class VAEDecodeTiled:
     @classmethod
@@ -315,24 +313,23 @@ class VAEDecodeTiled:
 
     @ray.remote(num_returns=2)
     def decode(self, vae, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
-        with torch.inference_mode():
-            if tile_size < overlap * 4:
-                overlap = tile_size // 4
-            if temporal_size < temporal_overlap * 2:
-                temporal_overlap = temporal_overlap // 2
-            temporal_compression = vae.temporal_compression_decode()
-            if temporal_compression is not None:
-                temporal_size = max(2, temporal_size // temporal_compression)
-                temporal_overlap = max(1, min(temporal_size // 2, temporal_overlap // temporal_compression))
-            else:
-                temporal_size = None
-                temporal_overlap = None
+        if tile_size < overlap * 4:
+            overlap = tile_size // 4
+        if temporal_size < temporal_overlap * 2:
+            temporal_overlap = temporal_overlap // 2
+        temporal_compression = vae.temporal_compression_decode()
+        if temporal_compression is not None:
+            temporal_size = max(2, temporal_size // temporal_compression)
+            temporal_overlap = max(1, min(temporal_size // 2, temporal_overlap // temporal_compression))
+        else:
+            temporal_size = None
+            temporal_overlap = None
 
-            compression = vae.spacial_compression_decode()
-            images = vae.decode_tiled(samples["samples"], tile_x=tile_size // compression, tile_y=tile_size // compression, overlap=overlap // compression, tile_t=temporal_size, overlap_t=temporal_overlap)
-            if len(images.shape) == 5: #Combine batches
-                images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
-            return images, None
+        compression = vae.spacial_compression_decode()
+        images = vae.decode_tiled(samples["samples"], tile_x=tile_size // compression, tile_y=tile_size // compression, overlap=overlap // compression, tile_t=temporal_size, overlap_t=temporal_overlap)
+        if len(images.shape) == 5: #Combine batches
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return images, None
 
 class VAEEncode:
     @classmethod
@@ -340,14 +337,13 @@ class VAEEncode:
         return {"required": { "pixels": ("IMAGE", ), "vae": ("VAE", )}}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "encode"
+    IS_GPU = True
 
     CATEGORY = "latent"
 
-    @ray.remote(num_returns=2)
     def encode(self, vae, pixels):
-        with torch.inference_mode():
-            t = vae.encode(pixels[:,:,:,:3])
-            return {"samples":t}, None
+        t = vae.encode(pixels[:,:,:,:3])
+        return {"samples":t}, None
 
 class VAEEncodeTiled:
     @classmethod
@@ -365,9 +361,8 @@ class VAEEncodeTiled:
 
     @ray.remote(num_returns=2)
     def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8):
-        with torch.inference_mode():
-            t = vae.encode_tiled(pixels[:,:,:,:3], tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
-            return {"samples": t}, None
+        t = vae.encode_tiled(pixels[:,:,:,:3], tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
+        return {"samples": t}, None
 
 class VAEEncodeForInpaint:
     @classmethod
@@ -375,40 +370,39 @@ class VAEEncodeForInpaint:
         return {"required": { "pixels": ("IMAGE", ), "vae": ("VAE", ), "mask": ("MASK", ), "grow_mask_by": ("INT", {"default": 6, "min": 0, "max": 64, "step": 1}),}}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "encode"
+    IS_GPU = True
 
     CATEGORY = "latent/inpaint"
 
-    @ray.remote(num_returns=2)
     def encode(self, vae, pixels, mask, grow_mask_by=6):
-        with torch.inference_mode():
-            x = (pixels.shape[1] // vae.downscale_ratio) * vae.downscale_ratio
-            y = (pixels.shape[2] // vae.downscale_ratio) * vae.downscale_ratio
-            mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(pixels.shape[1], pixels.shape[2]), mode="bilinear")
+        x = (pixels.shape[1] // vae.downscale_ratio) * vae.downscale_ratio
+        y = (pixels.shape[2] // vae.downscale_ratio) * vae.downscale_ratio
+        mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(pixels.shape[1], pixels.shape[2]), mode="bilinear")
 
-            pixels = pixels.clone()
-            if pixels.shape[1] != x or pixels.shape[2] != y:
-                x_offset = (pixels.shape[1] % vae.downscale_ratio) // 2
-                y_offset = (pixels.shape[2] % vae.downscale_ratio) // 2
-                pixels = pixels[:,x_offset:x + x_offset, y_offset:y + y_offset,:]
-                mask = mask[:,:,x_offset:x + x_offset, y_offset:y + y_offset]
+        pixels = pixels.clone()
+        if pixels.shape[1] != x or pixels.shape[2] != y:
+            x_offset = (pixels.shape[1] % vae.downscale_ratio) // 2
+            y_offset = (pixels.shape[2] % vae.downscale_ratio) // 2
+            pixels = pixels[:,x_offset:x + x_offset, y_offset:y + y_offset,:]
+            mask = mask[:,:,x_offset:x + x_offset, y_offset:y + y_offset]
 
-            #grow mask by a few pixels to keep things seamless in latent space
-            if grow_mask_by == 0:
-                mask_erosion = mask
-            else:
-                kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
-                padding = math.ceil((grow_mask_by - 1) / 2)
+        #grow mask by a few pixels to keep things seamless in latent space
+        if grow_mask_by == 0:
+            mask_erosion = mask
+        else:
+            kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
+            padding = math.ceil((grow_mask_by - 1) / 2)
 
-                mask_erosion = torch.clamp(torch.nn.functional.conv2d(mask.round(), kernel_tensor, padding=padding), 0, 1)
+            mask_erosion = torch.clamp(torch.nn.functional.conv2d(mask.round(), kernel_tensor, padding=padding), 0, 1)
 
-            m = (1.0 - mask.round()).squeeze(1)
-            for i in range(3):
-                pixels[:,:,:,i] -= 0.5
-                pixels[:,:,:,i] *= m
-                pixels[:,:,:,i] += 0.5
-            t = vae.encode(pixels)
+        m = (1.0 - mask.round()).squeeze(1)
+        for i in range(3):
+            pixels[:,:,:,i] -= 0.5
+            pixels[:,:,:,i] *= m
+            pixels[:,:,:,i] += 0.5
+        t = vae.encode(pixels)
 
-            return {"samples":t, "noise_mask": (mask_erosion[:,:,:x,:y].round())}, None
+        return {"samples":t, "noise_mask": (mask_erosion[:,:,:x,:y].round())}, None
 
 
 class InpaintModelConditioning:
@@ -425,10 +419,10 @@ class InpaintModelConditioning:
     RETURN_TYPES = ("CONDITIONING","CONDITIONING","LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "encode"
+    IS_GPU = True
 
     CATEGORY = "conditioning/inpaint"
 
-    @ray.remote(num_returns=3)
     def encode(self, positive, negative, pixels, vae, mask, noise_mask=True):
         x = (pixels.shape[1] // 8) * 8
         y = (pixels.shape[2] // 8) * 8
@@ -461,7 +455,7 @@ class InpaintModelConditioning:
             c = node_helpers.conditioning_set_values(conditioning, {"concat_latent_image": concat_latent,
                                                                     "concat_mask": mask})
             out.append(c)
-        return out[0], out[1], out_latent
+        return out[0], out[1], out_latent, None
 
 
 class SaveLatent:
@@ -560,16 +554,16 @@ class CheckpointLoader:
                               "ckpt_name": (folder_paths.get_filename_list("checkpoints"), )}}
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
+    IS_GPU = True
 
     CATEGORY = "advanced/loaders"
     DEPRECATED = True
 
-    @ray.remote(num_returns=3)
     def load_checkpoint(self, config_name, ckpt_name):
         config_path = folder_paths.get_full_path("configs", config_name)
         ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
         model, clip, vae = comfy.sd.load_checkpoint(config_path, ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return model, clip, vae
+        return model, clip, vae, None
 
 class CheckpointLoaderSimple:
     @classmethod
@@ -584,15 +578,15 @@ class CheckpointLoaderSimple:
                        "The CLIP model used for encoding text prompts.",
                        "The VAE model used for encoding and decoding images to and from latent space.")
     FUNCTION = "load_checkpoint"
+    IS_GPU = True
 
     CATEGORY = "loaders"
     DESCRIPTION = "Loads a diffusion model checkpoint, diffusion models are used to denoise latents."
 
-    @ray.remote(num_returns=3)
     def load_checkpoint(self, ckpt_name):
         ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return out[0], out[1], out[2]
+        return out[0], out[1], out[2], None
 
 class DiffusersLoader:
     @classmethod
@@ -607,10 +601,10 @@ class DiffusersLoader:
         return {"required": {"model_path": (paths,), }}
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
+    IS_GPU = True
 
     CATEGORY = "advanced/loaders/deprecated"
 
-    @ray.remote(num_returns=3)
     def load_checkpoint(self, model_path, output_vae=True, output_clip=True):
         for search_path in folder_paths.get_folder_paths("diffusers"):
             if os.path.exists(search_path):
@@ -620,7 +614,7 @@ class DiffusersLoader:
                     break
 
         unet, clip, vae = comfy.diffusers_load.load_diffusers(model_path, output_vae=output_vae, output_clip=output_clip, embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return unet, clip, vae
+        return unet, clip, vae, None
 
 
 class unCLIPCheckpointLoader:
@@ -630,14 +624,14 @@ class unCLIPCheckpointLoader:
                              }}
     RETURN_TYPES = ("MODEL", "CLIP", "VAE", "CLIP_VISION")
     FUNCTION = "load_checkpoint"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=4)
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
         ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return out[0], out[1], out[2], out[3]
+        return out[0], out[1], out[2], out[3], None
 
 class CLIPSetLastLayer:
     @classmethod
@@ -647,10 +641,10 @@ class CLIPSetLastLayer:
                               }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "set_last_layer"
+    IS_GPU = True
 
     CATEGORY = "conditioning"
 
-    @ray.remote(num_returns=2)
     def set_last_layer(self, clip, stop_at_clip_layer):
         clip = clip.clone()
         clip.clip_layer(stop_at_clip_layer)
@@ -675,11 +669,11 @@ class LoraLoader:
     RETURN_TYPES = ("MODEL", "CLIP")
     OUTPUT_TOOLTIPS = ("The modified diffusion model.", "The modified CLIP model.")
     FUNCTION = "load_lora"
+    IS_GPU = True
 
     CATEGORY = "loaders"
     DESCRIPTION = "LoRAs are used to modify diffusion and CLIP models, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
 
-    @ray.remote(num_returns=2)
     def load_lora(self, model, clip, lora_name, strength_model, strength_clip):
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
@@ -697,7 +691,7 @@ class LoraLoader:
             self.loaded_lora = (lora_path, lora)
 
         model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
-        return model_lora, clip_lora
+        return model_lora, clip_lora, None
 
 class LoraLoaderModelOnly(LoraLoader):
     @classmethod
@@ -708,8 +702,8 @@ class LoraLoaderModelOnly(LoraLoader):
                               }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_lora_model_only"
+    IS_GPU = True
 
-    @ray.remote(num_returns=2)
     def load_lora_model_only(self, model, lora_name, strength_model):
         return self.load_lora(model, None, lora_name, strength_model, 0)[0], None
 
@@ -789,11 +783,11 @@ class VAELoader:
         return {"required": { "vae_name": (s.vae_list(), )}}
     RETURN_TYPES = ("VAE",)
     FUNCTION = "load_vae"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
     #TODO: scale factor?
-    @ray.remote(num_returns=2)
     def load_vae(self, vae_name):
         if vae_name in ["taesd", "taesdxl", "taesd3", "taef1"]:
             sd = self.load_taesd(vae_name)
@@ -811,10 +805,10 @@ class ControlNetLoader:
 
     RETURN_TYPES = ("CONTROL_NET",)
     FUNCTION = "load_controlnet"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=2)
     def load_controlnet(self, control_net_name):
         controlnet_path = folder_paths.get_full_path_or_raise("controlnet", control_net_name)
         controlnet = comfy.controlnet.load_controlnet(controlnet_path)
@@ -830,10 +824,10 @@ class DiffControlNetLoader:
 
     RETURN_TYPES = ("CONTROL_NET",)
     FUNCTION = "load_controlnet"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=2)
     def load_controlnet(self, model, control_net_name):
         controlnet_path = folder_paths.get_full_path_or_raise("controlnet", control_net_name)
         controlnet = comfy.controlnet.load_controlnet(controlnet_path, model)
@@ -850,11 +844,11 @@ class ControlNetApply:
                              }}
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply_controlnet"
+    IS_GPU = True
 
     DEPRECATED = True
     CATEGORY = "conditioning/controlnet"
 
-    @ray.remote(num_returns=2)
     def apply_controlnet(self, conditioning, control_net, image, strength):
         if strength == 0:
             return (conditioning, )
@@ -890,10 +884,10 @@ class ControlNetApplyAdvanced:
     RETURN_TYPES = ("CONDITIONING","CONDITIONING")
     RETURN_NAMES = ("positive", "negative")
     FUNCTION = "apply_controlnet"
+    IS_GPU = True
 
     CATEGORY = "conditioning/controlnet"
 
-    @ray.remote(num_returns=2)
     def apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=None, extra_concat=[]):
         if strength == 0:
             return (positive, negative)
@@ -920,7 +914,7 @@ class ControlNetApplyAdvanced:
                 n = [t[0], d]
                 c.append(n)
             out.append(c)
-        return out[0], out[1]
+        return out[0], out[1], None
 
 
 class UNETLoader:
@@ -931,10 +925,10 @@ class UNETLoader:
                              }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
+    IS_GPU = True
 
     CATEGORY = "advanced/loaders"
 
-    @ray.remote(num_returns=2)
     def load_unet(self, unet_name, weight_dtype):
         model_options = {}
         if weight_dtype == "fp8_e4m3fn":
@@ -960,12 +954,12 @@ class CLIPLoader:
                              }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
+    IS_GPU = True
 
     CATEGORY = "advanced/loaders"
 
     DESCRIPTION = "[Recipes]\n\nstable_diffusion: clip-l\nstable_cascade: clip-g\nsd3: t5 xxl/ clip-g / clip-l\nstable_audio: t5 base\nmochi: t5 xxl\ncosmos: old t5 xxl\nlumina2: gemma 2 2B\nwan: umt5 xxl\n hidream: llama-3.1 (Recommend) or t5"
 
-    @ray.remote(num_returns=2)
     def load_clip(self, clip_name, type="stable_diffusion", device="default"):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
 
@@ -989,12 +983,12 @@ class DualCLIPLoader:
                              }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
+    IS_GPU = True
 
     CATEGORY = "advanced/loaders"
 
     DESCRIPTION = "[Recipes]\n\nsdxl: clip-l, clip-g\nsd3: clip-l, clip-g / clip-l, t5 / clip-g, t5\nflux: clip-l, t5\nhidream: at least one of t5 or llama, recommended t5 and llama"
 
-    @ray.remote(num_returns=2)
     def load_clip(self, clip_name1, clip_name2, type, device="default"):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
 
@@ -1015,10 +1009,10 @@ class CLIPVisionLoader:
                              }}
     RETURN_TYPES = ("CLIP_VISION",)
     FUNCTION = "load_clip"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=2)
     def load_clip(self, clip_name):
         clip_path = folder_paths.get_full_path_or_raise("clip_vision", clip_name)
         clip_vision = comfy.clip_vision.load(clip_path)
@@ -1035,17 +1029,16 @@ class CLIPVisionEncode:
                              }}
     RETURN_TYPES = ("CLIP_VISION_OUTPUT",)
     FUNCTION = "encode"
+    IS_GPU = True
 
     CATEGORY = "conditioning"
 
-    @ray.remote(num_returns=2)
     def encode(self, clip_vision, image, crop):
-        with torch.inference_mode():
-            crop_image = True
-            if crop != "center":
-                crop_image = False
-            output = clip_vision.encode_image(image, crop=crop_image)
-            return output, None
+        crop_image = True
+        if crop != "center":
+            crop_image = False
+        output = clip_vision.encode_image(image, crop=crop_image)
+        return output, None
 
 class StyleModelLoader:
     @classmethod
@@ -1057,7 +1050,6 @@ class StyleModelLoader:
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=2)
     def load_style_model(self, style_model_name):
         style_model_path = folder_paths.get_full_path_or_raise("style_models", style_model_name)
         style_model = comfy.sd.load_style_model(style_model_path)
@@ -1075,10 +1067,10 @@ class StyleModelApply:
                              }}
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply_stylemodel"
+    IS_GPU = True
 
     CATEGORY = "conditioning/style_model"
 
-    @ray.remote(num_returns=2)
     def apply_stylemodel(self, conditioning, style_model, clip_vision_output, strength, strength_type):
         cond = style_model.get_cond(clip_vision_output).flatten(start_dim=0, end_dim=1).unsqueeze(dim=0)
         if strength_type == "multiply":
@@ -1163,10 +1155,10 @@ class GLIGENLoader:
 
     RETURN_TYPES = ("GLIGEN",)
     FUNCTION = "load_gligen"
+    IS_GPU = True
 
     CATEGORY = "loaders"
 
-    @ray.remote(num_returns=2)
     def load_gligen(self, gligen_name):
         gligen_path = folder_paths.get_full_path_or_raise("gligen", gligen_name)
         gligen = comfy.sd.load_gligen(gligen_path)
@@ -1186,10 +1178,10 @@ class GLIGENTextBoxApply:
                              }}
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "append"
+    IS_GPU = True
 
     CATEGORY = "conditioning/gligen"
 
-    @ray.remote(num_returns=2)
     def append(self, conditioning_to, clip, gligen_textbox_model, text, width, height, x, y):
         c = []
         cond, cond_pooled = clip.encode_from_tokens(clip.tokenize(text), return_pooled="unprojected")
@@ -1571,14 +1563,13 @@ class KSampler:
     RETURN_TYPES = ("LATENT",)
     OUTPUT_TOOLTIPS = ("The denoised latent.",)
     FUNCTION = "sample"
+    IS_GPU = True
 
     CATEGORY = "sampling"
     DESCRIPTION = "Uses the provided model, positive and negative conditioning to denoise the latent image."
 
-    @ray.remote(num_returns=2)
     def sample(self, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0):
-        with torch.inference_mode():
-            return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise), None
+        return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise), None
 
 class KSamplerAdvanced:
     @classmethod
@@ -1602,10 +1593,10 @@ class KSamplerAdvanced:
 
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "sample"
+    IS_GPU = True
 
     CATEGORY = "sampling"
 
-    @ray.remote(num_returns=2)
     def sample(self, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, return_with_leftover_noise, denoise=1.0):
         force_full_denoise = True
         if return_with_leftover_noise == "enable":
@@ -1613,8 +1604,7 @@ class KSamplerAdvanced:
         disable_noise = False
         if add_noise == "disable":
             disable_noise = True
-        with torch.inference_mode():
-            return common_ksampler(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step, force_full_denoise=force_full_denoise), None
+        return common_ksampler(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step, force_full_denoise=force_full_denoise), None
 
 class SaveImage:
     def __init__(self):

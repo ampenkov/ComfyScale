@@ -47,26 +47,25 @@ class LTXVImgToVideo:
 
     CATEGORY = "conditioning/video_models"
     FUNCTION = "generate"
+    IS_GPU = True
 
 
-    @ray.remote(num_returns=3)
     def generate(self, positive, negative, image, vae, width, height, length, batch_size, strength):
-        with torch.inference_mode():
-            pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-            encode_pixels = pixels[:, :, :, :3]
-            t = vae.encode(encode_pixels)
+        pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        encode_pixels = pixels[:, :, :, :3]
+        t = vae.encode(encode_pixels)
 
-            latent = torch.zeros([batch_size, 128, ((length - 1) // 8) + 1, height // 32, width // 32], device=comfy.model_management.intermediate_device())
-            latent[:, :, :t.shape[2]] = t
+        latent = torch.zeros([batch_size, 128, ((length - 1) // 8) + 1, height // 32, width // 32], device=comfy.model_management.intermediate_device())
+        latent[:, :, :t.shape[2]] = t
 
-            conditioning_latent_frames_mask = torch.ones(
-                (batch_size, 1, latent.shape[2], 1, 1),
-                dtype=torch.float32,
-                device=latent.device,
-            )
-            conditioning_latent_frames_mask[:, :, :t.shape[2]] = 1.0 - strength
+        conditioning_latent_frames_mask = torch.ones(
+            (batch_size, 1, latent.shape[2], 1, 1),
+            dtype=torch.float32,
+            device=latent.device,
+        )
+        conditioning_latent_frames_mask[:, :, :t.shape[2]] = 1.0 - strength
 
-            return positive, negative, {"samples": latent, "noise_mask": conditioning_latent_frames_mask}
+        return positive, negative, {"samples": latent, "noise_mask": conditioning_latent_frames_mask}, None
 
 
 def conditioning_get_any_value(conditioning, key, default=None):

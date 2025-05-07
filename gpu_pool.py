@@ -7,7 +7,6 @@ import torch
 import ray
 
 from comfy.comfy_types.node_typing import IO
-from comfy.model_management import soft_empty_cache
 
 
 class ModelRef:

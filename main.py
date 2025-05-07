@@ -159,7 +159,9 @@ async def run(server_instance, address='', port=8188, verbose=True, call_on_star
     for addr in address.split(","):
         addresses.append((addr, port))
     await asyncio.gather(
-        server_instance.start_multi_address(addresses, call_on_start, verbose), server_instance.publish_loop()
+        server_instance.start_multi_address(addresses, call_on_start, verbose),
+        server_instance.publish_loop(),
+        server_instance.cleanup_loop(),
     )
 
 

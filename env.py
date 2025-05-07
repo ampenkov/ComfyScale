@@ -2,6 +2,7 @@ import os
 
 # ray
 NUM_PARALLELISM = int(os.getenv("NUM_PARALLELISM", 4))
+NUM_GPUS = int(os.getenv("NUM_GPUS", 0))
 OBJECT_STORE_FRACTION = float(os.getenv("OBJECT_STORE_FRACTION", 0.3))
 
 # dashboard

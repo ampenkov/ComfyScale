@@ -12,17 +12,23 @@ class Cache:
         self.ref_counts = defaultdict(int)
 
     def get(self, prompt):
+        sigs = {}
         outputs = {}
         for node_id in prompt.keys():
             sig = get_node_signature(prompt, node_id)
+            sigs[node_id] = sig
+
             obj = self.cache.get(sig)
             if obj is not None:
                 outputs[node_id] = obj
                 self.ref_counts[sig] += 1
 
-        return outputs
+        return sigs, outputs
 
-    def set(self, outputs, prompt) -> None:
+    def get_used(self):
+        return self.cache.keys()
+
+    def set(self, outputs, prompt):
         for node_id, obj_ref in outputs.items():
             sig = get_node_signature(prompt, node_id)
             if sig not in self.cache:

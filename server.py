@@ -18,6 +18,7 @@ from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
 
+import asyncio
 import aiohttp
 from aiohttp import web
 import logging
@@ -35,9 +36,10 @@ from app.custom_node_manager import CustomNodeManager
 from typing import Optional
 from api_server.routes.internal.internal_routes import InternalRoutes
 
-from gpu_pool import GPUPool
 from cache import Cache
+from env import NUM_GPUS
 from execution import execute_prompt
+from gpu_pool import GPUPool
 from message_queue import MessageQueue
 from metrics import REQUEST_COUNT
 
@@ -160,9 +162,11 @@ class PromptServer():
         mimetypes.add_type('application/javascript; charset=utf-8', '.js')
         mimetypes.add_type('image/webp', '.webp')
 
-        self.gpu_pool = GPUPool()
         self.cache = Cache.remote()
         self.messages = MessageQueue.remote()
+
+        self.gpu_pool = GPUPool(NUM_GPUS)
+        self.gpu_pool.set_cache(self.cache)
 
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
@@ -193,8 +197,6 @@ class PromptServer():
         logging.info(f"[Prompt Server] web root: {self.web_root}")
         routes = web.RouteTableDef()
         self.routes = routes
-        self.last_node_id = None
-        self.client_id = None
 
         self.on_prompt_handlers = []
 
@@ -767,6 +769,11 @@ class PromptServer():
             msgs = await self.messages.get.remote()
             for msg in msgs:
                 await self.send(*msg)
+
+    async def cleanup_loop(self):
+        while True:
+            await self.gpu_pool.cleanup()
+            await asyncio.sleep(10)
 
     async def start(self, address, port, verbose=True, call_on_start=None):
         await self.start_multi_address([(address, port)], call_on_start=call_on_start)

@@ -1,3 +1,5 @@
+import gc
+import logging
 import uuid
 import random
 
@@ -5,10 +7,11 @@ import torch
 import ray
 
 from comfy.comfy_types.node_typing import IO
+from comfy.model_management import loaded_models
 
 
 class ModelRef:
-    def __init__(self, model_id: str):
+    def __init__(self, model_id):
         self.id = model_id
 
     def __repr__(self):
@@ -56,11 +59,30 @@ class GPUWorker:
 
         return mapped_outputs
 
+    def cleanup_models(self, sigs):
+        sigs = set(sigs)
+        cleanup_keys = [key for key in self._models if key[0] not in sigs]
+        for key in cleanup_keys:
+            del self._models[key]
+
+        gc.collect()
+        print(loaded_models())
+
 
 class GPUPool:
-    def __init__(self):
-        num_gpus = int(ray.cluster_resources().get("GPU", 0))
+    def __init__(self, num_gpus):
         self.workers = [GPUWorker.remote() for _ in range(num_gpus)]
+
+    def set_cache(self, cache):
+        self.cache = cache
+
+    async def cleanup(self):
+        try:
+            sigs = await self.cache.get_used.remote()
+            for worker in self.workers:
+                    worker.cleanup_models.remote(sigs)
+        except Exception as e:
+            logging.error("[GPU CLEANUP LOOP ERROR]", e)
 
     def should_execute(self, node_obj) -> bool:
         if not self.workers:
@@ -71,13 +93,13 @@ class GPUPool:
 
         return any(rt in GPU_MODEL_IO_TYPES for rt in getattr(node_obj, "RETURN_TYPES", []))
 
-    def execute(self, node_obj, func, inputs):
+    def execute(self, node_obj, func, inputs, sig):
         return_types = getattr(node_obj, "RETURN_TYPES", ()) or (None,)
         num_returns = len(return_types)
 
         if any(rt in GPU_MODEL_IO_TYPES for rt in return_types):
             common_model_ids = {
-                i: str(uuid.uuid4())
+                i: (sig, i)
                 for i, rt in enumerate(return_types)
                 if rt in GPU_MODEL_IO_TYPES
             }

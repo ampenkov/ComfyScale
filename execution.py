@@ -44,7 +44,7 @@ class IsChangedCache:
         # Intentionally do not use cached outputs here. We only want constants in IS_CHANGED
         input_data_all, _ = get_input_data(node["inputs"], class_def, node_id, None)
         try:
-            is_changed = _map_node_over_list(class_def, input_data_all, "IS_CHANGED")
+            is_changed = _map_node_over_list(class_def, "IS_CHANGED", input_data_all)
             node["is_changed"] = [None if isinstance(x, ExecutionBlocker) else x for x in is_changed]
         except Exception as e:
             logging.warning("WARNING: {}".format(e))
@@ -96,11 +96,12 @@ map_node_over_list = None #Don't hook this please
 
 def _map_node_over_list(
     obj,
-    input_data_all,
     func,
-    gpu_pool=None,
+    input_data_all,
+    sig=None,
     execution_block_cb=None,
     pre_execute_cb=None,
+    gpu_pool=None,
 ):
     # check if node wants the lists
     input_is_list = getattr(obj, "INPUT_IS_LIST", False)
@@ -134,7 +135,7 @@ def _map_node_over_list(
                 results.append(getattr(obj, func)(**inputs))
             else:
                 if gpu_pool is not None and gpu_pool.should_execute(obj):
-                    results.append(gpu_pool.execute(obj, func, inputs))
+                    results.append(gpu_pool.execute(obj, func, inputs, sig))
                 else:
                     results.append(getattr(obj, func).remote(**{"self": obj, **inputs}))
         else:
@@ -171,15 +172,23 @@ def merge_result_data(results, obj):
             output.append([o[i] for o in results])
     return output
 
-def get_output_data(obj, input_data_all, gpu_pool=None, execution_block_cb=None, pre_execute_cb=None):
+def get_output_data(
+    obj,
+    input_data_all,
+    sig,
+    execution_block_cb=None,
+    pre_execute_cb=None,
+    gpu_pool=None,
+):
     results = []
     return_values = _map_node_over_list(
         obj,
-        input_data_all,
         obj.FUNCTION,
-        gpu_pool=gpu_pool,
+        input_data_all,
+        sig=sig,
         execution_block_cb=execution_block_cb,
         pre_execute_cb=pre_execute_cb,
+        gpu_pool=gpu_pool,
     )
 
     for i in range(len(return_values)):
@@ -208,6 +217,7 @@ def execute_node(
     prompt_id,
     node_id,
     prompt,
+    sigs,
     outputs,
     staged,
     gpu_pool,
@@ -248,9 +258,10 @@ def execute_node(
         output_data = get_output_data(
             obj,
             input_data_all,
-            gpu_pool,
+            sigs[node_id],
             execution_block_cb=execution_block_cb,
             pre_execute_cb=pre_execute_cb,
+            gpu_pool=gpu_pool,
         )
 
         outputs[node_id] = output_data
@@ -298,7 +309,7 @@ def execute_prompt(
         REQUEST_COUNT.inc(1, {**tags, "status": "fail"})
 
     try:
-        outputs = ray.get(cache.get.remote(prompt))
+        sigs, outputs = ray.get(cache.get.remote(prompt))
         messages.add.remote(
             "execution_cached",
             {"nodes": list(outputs.keys()), "prompt_id": prompt_id},
@@ -321,6 +332,7 @@ def execute_prompt(
                 prompt_id,
                 node_id,
                 prompt,
+                sigs,
                 outputs,
                 staged,
                 gpu_pool,
@@ -334,8 +346,8 @@ def execute_prompt(
 
         cache.set.remote(outputs, prompt)
 
-        for obj_list in outputs.values():
-            for ref in obj_list:
+        for refs in outputs.values():
+            for ref in refs:
                 ray.get(ref)
 
     except RuntimeError as re:
@@ -565,7 +577,7 @@ def validate_inputs(prompt, item, validated):
             input_filtered['input_types'] = [received_types]
 
         #ret = obj_class.VALIDATE_INPUTS(**input_filtered)
-        ret = _map_node_over_list(obj_class, input_filtered, "VALIDATE_INPUTS")
+        ret = _map_node_over_list(obj_class, "VALIDATE_INPUTS", input_filtered)
         for x in input_filtered:
             for i, r in enumerate(ret):
                 if r is not True and not isinstance(r, ExecutionBlocker):

@@ -2,7 +2,6 @@ import comfy.sd
 import comfy.model_sampling
 import comfy.latent_formats
 import nodes
-import ray
 import torch
 import node_helpers
 

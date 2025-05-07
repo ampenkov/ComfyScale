@@ -7,7 +7,7 @@ import torch
 import ray
 
 from comfy.comfy_types.node_typing import IO
-from comfy.model_management import loaded_models
+from comfy.model_management import soft_empty_cache
 
 
 class ModelRef:
@@ -66,7 +66,7 @@ class GPUWorker:
             del self._models[key]
 
         gc.collect()
-        print(loaded_models())
+        soft_empty_cache()
 
 
 class GPUPool:

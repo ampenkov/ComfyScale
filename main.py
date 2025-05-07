@@ -12,7 +12,7 @@ import logging
 
 import ray
 
-from env import NUM_PARALLELISM, DASHBOARD_HOST, DASHBOARD_PORT, METRICS_PORT
+from env import RAY_ADDRESS, NUM_PARALLELISM, DASHBOARD_HOST, DASHBOARD_PORT, METRICS_PORT
 from comfy.cli_args import args
 import utils.extra_config
 
@@ -231,12 +231,15 @@ if __name__ == "__main__":
     logging.info("Python version: {}".format(sys.version))
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
 
-    ray.init(
-        resources={"num_parallelism": NUM_PARALLELISM},
-        dashboard_host=DASHBOARD_HOST,
-        dashboard_port=DASHBOARD_PORT,
-        _metrics_export_port=METRICS_PORT,
-    )
+    if RAY_ADDRESS:
+        ray.init(address=RAY_ADDRESS)
+    else:
+        ray.init(
+            resources={"num_parallelism": NUM_PARALLELISM},
+            dashboard_host=DASHBOARD_HOST,
+            dashboard_port=DASHBOARD_PORT,
+            _metrics_export_port=METRICS_PORT,
+        )
 
     event_loop, _, start_all_func = start_comfyui()
     try:

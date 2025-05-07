@@ -66,7 +66,6 @@ class GPUWorker:
             del self._models[key]
 
         gc.collect()
-        soft_empty_cache()
 
 
 class GPUPool:

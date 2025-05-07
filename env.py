@@ -1,6 +1,7 @@
 import os
 
 # ray
+RAY_ADDRESS = os.getenv("RAY_ADDRESS")
 NUM_GPUS = int(os.getenv("NUM_GPUS", 0))
 NUM_PARALLELISM = int(os.getenv("NUM_PARALLELISM", 4))
 

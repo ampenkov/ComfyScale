@@ -773,7 +773,7 @@ class PromptServer():
     async def cleanup_loop(self):
         while True:
             await self.gpu_pool.cleanup()
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
 
     async def start(self, address, port, verbose=True, call_on_start=None):
         await self.start_multi_address([(address, port)], call_on_start=call_on_start)

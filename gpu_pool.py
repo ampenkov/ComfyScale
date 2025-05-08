@@ -1,7 +1,7 @@
 import gc
+import itertools
 import logging
 import uuid
-import random
 
 import torch
 import ray
@@ -70,6 +70,8 @@ class GPUWorker:
 class GPUPool:
     def __init__(self, num_gpus):
         self.workers = [GPUWorker.remote() for _ in range(num_gpus)]
+        self.worker_cycle = itertools.cycle(self.workers)
+        self.cache = None
 
     def set_cache(self, cache):
         self.cache = cache
@@ -107,6 +109,6 @@ class GPUPool:
                 outputs.extend(worker.execute.options(num_returns=num_returns + 1).remote(node_obj, func, **shared_inputs))
             return outputs
 
-        worker = random.choice(self.workers)
+        worker = next(self.worker_cycle)
         outputs = worker.execute.options(num_returns=num_returns + 1).remote( node_obj, func, **inputs)
         return outputs

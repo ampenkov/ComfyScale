@@ -252,6 +252,9 @@ class ConditioningZeroOut:
             pooled_output = d.get("pooled_output", None)
             if pooled_output is not None:
                 d["pooled_output"] = torch.zeros_like(pooled_output)
+            conditioning_lyrics = d.get("conditioning_lyrics", None)
+            if conditioning_lyrics is not None:
+                d["conditioning_lyrics"] = torch.zeros_like(conditioning_lyrics)
             n = [torch.zeros_like(t[0]), d]
             c.append(n)
         return c, None
@@ -947,7 +950,7 @@ class CLIPLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": (folder_paths.get_filename_list("text_encoders"), ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -1136,16 +1139,7 @@ class unCLIPConditioning:
         if strength == 0:
             return (conditioning, )
 
-        c = []
-        for t in conditioning:
-            o = t[1].copy()
-            x = {"clip_vision_output": clip_vision_output, "strength": strength, "noise_augmentation": noise_augmentation}
-            if "unclip_conditioning" in o:
-                o["unclip_conditioning"] = o["unclip_conditioning"][:] + [x]
-            else:
-                o["unclip_conditioning"] = [x]
-            n = [t[0], o]
-            c.append(n)
+        c = node_helpers.conditioning_set_values(conditioning, {"unclip_conditioning": [{"clip_vision_output": clip_vision_output, "strength": strength, "noise_augmentation": noise_augmentation}]}, append=True)
         return c, None
 
 class GLIGENLoader:
@@ -1999,8 +1993,7 @@ class ImagePadForOutpaint:
 
         mask[top:top + d2, left:left + d3] = t
 
-        return new_image, mask
-
+        return new_image, mask.unsqueeze(0)
 
 NODE_CLASS_MAPPINGS = {
     "KSampler": KSampler,
@@ -2009,11 +2002,7 @@ NODE_CLASS_MAPPINGS = {
     "CLIPSetLastLayer": CLIPSetLastLayer,
     "VAEDecode": VAEDecode,
     "VAEEncode": VAEEncode,
-    "VAEEncodeForInpaint": VAEEncodeForInpaint,
-    "VAELoader": VAELoader,
-    "EmptyLatentImage": EmptyLatentImage,
     "LatentUpscale": LatentUpscale,
-    "LatentUpscaleBy": LatentUpscaleBy,
     "LatentFromBatch": LatentFromBatch,
     "RepeatLatentBatch": RepeatLatentBatch,
     "SaveImage": SaveImage,

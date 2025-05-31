@@ -127,14 +127,7 @@ if __name__ == "__main__":
 
     import cuda_malloc
 
-if args.windows_standalone_build:
-    try:
-        from fix_torch import fix_pytorch_libomp
-        fix_pytorch_libomp()
-    except:
-        pass
-
-
+import comfy.utils
 import server
 import nodes
 import comfy.model_management
@@ -196,12 +189,13 @@ def start_comfyui(asyncio_loop=None):
     prompt_server = server.PromptServer(asyncio_loop)
 
     hook_breaker_ac10a0.save_functions()
-    nodes.init_extra_nodes(init_custom_nodes=not args.disable_all_custom_nodes)
+    nodes.init_extra_nodes(init_custom_nodes=not args.disable_all_custom_nodes, init_api_nodes=not args.disable_api_nodes)
     hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
 
     prompt_server.add_routes()
+
 
     if args.quick_test_for_ci:
         exit(0)
